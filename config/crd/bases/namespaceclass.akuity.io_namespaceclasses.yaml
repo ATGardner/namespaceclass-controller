@@ -40,12 +40,11 @@ spec:
             description: spec defines the desired state of NamespaceClass
             properties:
               resources:
+                default: []
                 items:
                   type: object
                 type: array
                 x-kubernetes-preserve-unknown-fields: true
-            required:
-            - resources
             type: object
           status:
             description: status defines the observed state of NamespaceClass

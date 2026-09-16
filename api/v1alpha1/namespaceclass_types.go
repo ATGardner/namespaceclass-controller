@@ -24,7 +24,9 @@ import (
 
 // NamespaceClassSpec defines the desired state of NamespaceClass
 type NamespaceClassSpec struct {
+	// +kubebuilder:default:={}
 	// +kubebuilder:pruning:PreserveUnknownFields
+	// +optional
 	Resources []unstructured.Unstructured `json:"resources"`
 }
 
