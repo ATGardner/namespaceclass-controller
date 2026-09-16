@@ -17,9 +17,12 @@ limitations under the License.
 package controller
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"slices"
+	"text/template"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -36,6 +39,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/yaml"
 
 	namespaceclassv1alpha1 "github.com/atgardner/namespaceclass-controller/api/v1alpha1"
 )
@@ -115,6 +119,33 @@ func setAppliedResources(ns *corev1.Namespace, resources []appliedResource) erro
 	return nil
 }
 
+func templateResourceNamespace(u *unstructured.Unstructured, namespace string) (*unstructured.Unstructured, error) {
+	data, err := yaml.Marshal(u)
+	if err != nil {
+		return nil, fmt.Errorf("failed marshaling resource %s: %w", u.GetName(), err)
+	}
+
+	t, err := template.New("tmpl").Parse(string(data))
+	if err != nil {
+		return nil, fmt.Errorf("failed creating template for resource %s: %w", u.GetName(), err)
+	}
+
+	var buf bytes.Buffer
+	if err := t.Execute(&buf, map[string]string{
+		"namespace": namespace,
+	}); err != nil {
+		return nil, fmt.Errorf("failed executing template for resource %s: %w", u.GetName(), err)
+	}
+
+	res := &unstructured.Unstructured{}
+	err = yaml.Unmarshal(buf.Bytes(), res)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal generated YAML for resource %s: %w", u.GetName(), err)
+	}
+
+	return res, nil
+}
+
 // NamespaceReconciler reconciles a Namespace object
 type NamespaceReconciler struct {
 	client.Client
@@ -157,28 +188,16 @@ func (r *NamespaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if nsClass != nil && nsClass.DeletionTimestamp.IsZero() {
 		desired = make([]appliedResource, len(nsClass.Spec.Resources))
 		for i := range nsClass.Spec.Resources {
-			// Deep-copy so mutations below don't alter the NamespaceClass's own
-			// in-memory spec, and so Server-Side Apply always sends the full
-			// desired content rather than whatever a prior Get left behind.
-			res := nsClass.Spec.Resources[i].DeepCopy()
-			// override any accidental "namespace" field that exist in the NamespaceClass spec
-			res.SetNamespace(namespace.Name)
-
-			resLabels := res.GetLabels()
-			if resLabels == nil {
-				resLabels = map[string]string{}
-			}
-			resLabels[parentClassLabel] = nsClass.Name
-			res.SetLabels(resLabels)
-
-			if err := controllerutil.SetControllerReference(nsClass, res, r.Scheme); err != nil {
-				log.Error(err, "Failed to set controller reference", "kind", res.GroupVersionKind().Kind, "name", res.GetName())
-				return ctrl.Result{}, err
+			orig := nsClass.Spec.Resources[i]
+			res, err := r.getFinalResource(&orig, namespace.Name, nsClass)
+			if err != nil {
+				log.Error(err, "Failed to get final resource to apply", "kind", orig.GroupVersionKind().Kind, "name", orig.GetName())
+				return ctrl.Result{}, fmt.Errorf("failed to get final resource %s/%s: %w", orig.GroupVersionKind().Kind, orig.GetName(), err)
 			}
 
 			if err := r.Patch(ctx, res, client.Apply, client.ForceOwnership, client.FieldOwner(fieldOwner)); err != nil {
 				log.Error(err, "Failed to apply resource", "kind", res.GroupVersionKind().Kind, "name", res.GetName())
-				return ctrl.Result{}, err
+				return ctrl.Result{}, fmt.Errorf("failed to apply resource %s/%s: %w", res.GroupVersionKind().Kind, res.GetName(), err)
 			}
 
 			desired[i] = toAppliedResource(res)
@@ -201,7 +220,7 @@ func (r *NamespaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 		if err := r.deleteOrphanResource(ctx, res, namespace.Name); err != nil {
 			log.Error(err, "Failed to delete stale resource", "kind", res.Kind, "name", res.Name)
-			return ctrl.Result{}, err
+			return ctrl.Result{}, fmt.Errorf("failed to delete stale resource %s/%s: %w", res.Kind, res.Name, err)
 		}
 
 		log.Info("Deleted stale resource", "kind", res.Kind, "name", res.Name)
@@ -211,12 +230,12 @@ func (r *NamespaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		patch := client.MergeFrom(namespace.DeepCopy())
 		if err := setAppliedResources(namespace, desired); err != nil {
 			log.Error(err, "Failed to encode applied-resources annotation")
-			return ctrl.Result{}, err
+			return ctrl.Result{}, fmt.Errorf("failed to encode applied-resources annotation: %w", err)
 		}
 
 		if err := r.Patch(ctx, namespace, patch); err != nil {
 			log.Error(err, "Failed to update applied-resources annotation")
-			return ctrl.Result{}, err
+			return ctrl.Result{}, fmt.Errorf("failed to update applied-resources annotation: %w", err)
 		}
 	}
 
@@ -298,6 +317,30 @@ func (r *NamespaceReconciler) getNamespaceClass(ctx context.Context, ns *corev1.
 	}
 
 	return nsClass, nil
+}
+
+func (r *NamespaceReconciler) getFinalResource(u *unstructured.Unstructured, namespace string, nsClass *namespaceclassv1alpha1.NamespaceClass) (*unstructured.Unstructured, error) {
+	res, err := templateResourceNamespace(u, namespace)
+	if err != nil {
+		return nil, err
+	}
+
+	// override any accidental "namespace" field that exist in the NamespaceClass spec
+	res.SetNamespace(namespace)
+
+	resLabels := res.GetLabels()
+	if resLabels == nil {
+		resLabels = map[string]string{}
+	}
+
+	resLabels[parentClassLabel] = nsClass.Name
+	res.SetLabels(resLabels)
+
+	if err := controllerutil.SetControllerReference(nsClass, res, r.Scheme); err != nil {
+		return nil, fmt.Errorf("failed to set controller reference: %w", err)
+	}
+
+	return res, nil
 }
 
 func (r *NamespaceReconciler) mapClassToNamespaces(ctx context.Context, obj client.Object) []reconcile.Request {
