@@ -151,6 +151,11 @@ build-installer: manifests generate kustomize ## Generate a consolidated YAML wi
 	mkdir -p dist
 	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG}
 	"$(KUSTOMIZE)" build config/default > dist/install.yaml
+	$(MAKE) helm-generate
+
+.PHONY: helm-generate
+helm-generate: kubebuilder ## Regenerate the Helm chart in dist/chart from dist/install.yaml.
+	"$(KUBEBUILDER)" edit --plugins=helm.kubebuilder.io/v2-alpha
 
 ##@ Deployment
 
@@ -187,6 +192,7 @@ $(LOCALBIN):
 ## Tool Binaries
 KUBECTL ?= kubectl
 KIND ?= kind
+KUBEBUILDER ?= kubebuilder
 KUSTOMIZE ?= $(LOCALBIN)/kustomize
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
@@ -229,6 +235,13 @@ setup-envtest: envtest ## Download the binaries required for ENVTEST in the loca
 envtest: $(ENVTEST) ## Download setup-envtest locally if necessary.
 $(ENVTEST): $(LOCALBIN)
 	$(call go-install-tool,$(ENVTEST),sigs.k8s.io/controller-runtime/tools/setup-envtest,$(ENVTEST_VERSION))
+
+.PHONY: kubebuilder
+kubebuilder: ## Verify kubebuilder is installed locally.
+	@command -v $(KUBEBUILDER) >/dev/null 2>&1 || { \
+		echo "kubebuilder is not installed. Please install it manually: https://book.kubebuilder.io/quick-start.html#installation"; \
+		exit 1; \
+	}
 
 .PHONY: golangci-lint
 golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.

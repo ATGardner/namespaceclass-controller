@@ -12,4 +12,14 @@ plugins:
     output: dist
 projectName: namespaceclass-controller
 repo: github.com/atgardner/namespaceclass-controller
+resources:
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: akuity.io
+  group: namespaceclass
+  kind: NamespaceClass
+  path: github.com/atgardner/namespaceclass-controller/api/v1alpha1
+  version: v1alpha1
 version: "3"
