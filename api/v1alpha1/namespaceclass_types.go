@@ -18,6 +18,7 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
@@ -31,9 +32,8 @@ type NamespaceClassSpec struct {
 	// The following markers will use OpenAPI v3 schema to validate the value
 	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
 
-	// foo is an example field of NamespaceClass. Edit namespaceclass_types.go to remove/update
-	// +optional
-	Foo *string `json:"foo,omitempty"`
+	// +kubebuilder:pruning:PreserveUnknownFields
+	Resources []unstructured.Unstructured `json:"resources"`
 }
 
 // NamespaceClassStatus defines the observed state of NamespaceClass.

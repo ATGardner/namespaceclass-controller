@@ -25,8 +25,9 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -41,6 +42,10 @@ import (
 // namespaceClassLabel marks a Namespace as managed by a NamespaceClass.
 const namespaceClassLabel = "namespaceclass.akuity.io/name"
 const parentClassLabel = "namespaceclass.akuity.io/parent"
+
+// fieldOwner identifies this controller as the Server-Side Apply field
+// manager for resources templated from a NamespaceClass.
+const fieldOwner = "namespaceclass-controller"
 
 // appliedResourcesAnnotation records, on the Namespace, the GVK+name of every
 // resource this controller applied on its last successful reconcile. It's
@@ -61,8 +66,13 @@ type appliedResource struct {
 
 // configMapAppliedResource is the appliedResource identity for a ConfigMap
 // with the given name.
-func configMapAppliedResource(name string) appliedResource {
-	return appliedResource{Version: "v1", Kind: "ConfigMap", Name: name}
+func toAppliedResource(u *unstructured.Unstructured) appliedResource {
+	return appliedResource{
+		Group:   u.GroupVersionKind().Group,
+		Version: u.GroupVersionKind().Version,
+		Kind:    u.GetKind(),
+		Name:    u.GetName(),
+	}
 }
 
 // readAppliedResources returns the resources recorded from the last
@@ -140,34 +150,36 @@ func (r *NamespaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, nil
 	}
 
-	var desired []appliedResource
-	if nsClass.Spec.Foo != nil {
-		desired = []appliedResource{configMapAppliedResource(*nsClass.Spec.Foo)}
-	}
+	log = log.WithValues("nsClass", nsClass.Name)
+	ctx = logf.IntoContext(ctx, log)
 
-	for _, res := range desired {
-		cm := &corev1.ConfigMap{
-			ObjectMeta: v1.ObjectMeta{
-				Name:      res.Name,
-				Namespace: namespace.Name,
-			},
+	desired := make([]appliedResource, len(nsClass.Spec.Resources))
+	for i := range nsClass.Spec.Resources {
+		// Deep-copy so mutations below don't alter the NamespaceClass's own
+		// in-memory spec, and so Server-Side Apply always sends the full
+		// desired content rather than whatever a prior Get left behind.
+		res := nsClass.Spec.Resources[i].DeepCopy()
+		// override any accidental "namespace" field that exist in the NamespaceClass spec
+		res.SetNamespace(namespace.Name)
+
+		resLabels := res.GetLabels()
+		if resLabels == nil {
+			resLabels = map[string]string{}
 		}
-		if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, cm, func() error {
-			cmLabels := cm.GetLabels()
-			if cmLabels == nil {
-				cmLabels = map[string]string{}
-			}
+		resLabels[parentClassLabel] = nsClass.Name
+		res.SetLabels(resLabels)
 
-			cmLabels[parentClassLabel] = nsClass.Name
-			cm.SetLabels(cmLabels)
-			cm.Data = map[string]string{
-				"foo": "bar",
-			}
-			return controllerutil.SetControllerReference(nsClass, cm, r.Scheme)
-		}); err != nil {
-			log.Error(err, "Failed to create or update ConfigMap", "name", res.Name)
+		if err := controllerutil.SetControllerReference(nsClass, res, r.Scheme); err != nil {
+			log.Error(err, "Failed to set controller reference", "kind", res.GroupVersionKind().Kind, "name", res.GetName())
 			return ctrl.Result{}, err
 		}
+
+		if err := r.Patch(ctx, res, client.Apply, client.ForceOwnership, client.FieldOwner(fieldOwner)); err != nil {
+			log.Error(err, "Failed to apply resource", "kind", res.GroupVersionKind().Kind, "name", res.GetName())
+			return ctrl.Result{}, err
+		}
+
+		desired[i] = toAppliedResource(res)
 	}
 
 	applied, err := readAppliedResources(&namespace)
@@ -183,15 +195,8 @@ func (r *NamespaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		if slices.Contains(desired, res) {
 			continue
 		}
-		if res.Kind != "ConfigMap" {
-			// Nothing today records a non-ConfigMap entry; skip rather than
-			// guess how to delete a kind this controller doesn't manage yet.
-			log.Info("Skipping deletion of unsupported managed kind", "kind", res.Kind, "name", res.Name)
-			continue
-		}
 
-		cm := &corev1.ConfigMap{ObjectMeta: v1.ObjectMeta{Name: res.Name, Namespace: namespace.Name}}
-		if err := r.Delete(ctx, cm); err != nil && !apierrors.IsNotFound(err) {
+		if err := r.deleteOrphanResource(ctx, res, namespace.Name); err != nil {
 			log.Error(err, "Failed to delete stale resource", "kind", res.Kind, "name", res.Name)
 			return ctrl.Result{}, err
 		}
@@ -240,7 +245,6 @@ func (r *NamespaceReconciler) getNamespaceClass(ctx context.Context, ns corev1.N
 		return nil, nil
 	}
 
-	log = log.WithValues("nsClass", nsClassName)
 	var nsClass namespaceclassv1alpha1.NamespaceClass
 	return &nsClass, r.Get(ctx, client.ObjectKey{
 		Name: nsClassName,
@@ -263,4 +267,16 @@ func (r *NamespaceReconciler) mapClassToNamespaces(ctx context.Context, obj clie
 
 	log.Info("Generating requests for Namespaces", "count", len(nsList.Items))
 	return reqs
+}
+
+func (r *NamespaceReconciler) deleteOrphanResource(ctx context.Context, res appliedResource, namespace string) error {
+	u := &unstructured.Unstructured{}
+	u.SetGroupVersionKind(schema.GroupVersionKind{Group: res.Group, Version: res.Version, Kind: res.Kind})
+	u.SetName(res.Name)
+	u.SetNamespace(namespace)
+	if err := r.Delete(ctx, u); err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+
+	return nil
 }

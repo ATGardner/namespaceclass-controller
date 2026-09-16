@@ -51,6 +51,12 @@ spec:
                 description: foo is an example field of NamespaceClass. Edit namespaceclass_types.go
                   to remove/update
                 type: string
+              resources:
+                items:
+                  type: object
+                type: array
+            required:
+            - resources
             type: object
           status:
             description: status defines the observed state of NamespaceClass
