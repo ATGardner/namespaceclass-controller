@@ -1,6 +1,0 @@
-apiVersion: v1
-kind: Namespace
-metadata:
-  labels:
-    namespaceclass.akuity.io/name: class1
-  name: namespace-1
