@@ -22,6 +22,7 @@ import (
 	"slices"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -126,8 +127,8 @@ type NamespaceReconciler struct {
 func (r *NamespaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, reconcileErr error) {
 	log := logf.FromContext(ctx)
 
-	var namespace corev1.Namespace
-	if err := r.Get(ctx, req.NamespacedName, &namespace); err != nil {
+	namespace := &corev1.Namespace{}
+	if err := r.Get(ctx, req.NamespacedName, namespace); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
@@ -147,7 +148,7 @@ func (r *NamespaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// returns above intentionally don't have a Namespace/NamespaceClass pair
 	// worth reporting on yet.
 	defer func() {
-		if err := r.setReconcileError(ctx, &namespace, reconcileErr); err != nil {
+		if err := r.setReconcileError(ctx, namespace, reconcileErr); err != nil {
 			log.Error(err, "Failed to record reconcile-error annotation")
 		}
 	}()
@@ -184,7 +185,7 @@ func (r *NamespaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 	}
 
-	applied, err := readAppliedResources(&namespace)
+	applied, err := readAppliedResources(namespace)
 	if err != nil {
 		// Unreadable record: treat as empty rather than fail reconciliation.
 		// The write below repairs it, and any orphan this misses is caught
@@ -208,12 +209,12 @@ func (r *NamespaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	if !slices.Equal(applied, desired) {
 		patch := client.MergeFrom(namespace.DeepCopy())
-		if err := setAppliedResources(&namespace, desired); err != nil {
+		if err := setAppliedResources(namespace, desired); err != nil {
 			log.Error(err, "Failed to encode applied-resources annotation")
 			return ctrl.Result{}, err
 		}
 
-		if err := r.Patch(ctx, &namespace, patch); err != nil {
+		if err := r.Patch(ctx, namespace, patch); err != nil {
 			log.Error(err, "Failed to update applied-resources annotation")
 			return ctrl.Result{}, err
 		}
@@ -280,17 +281,23 @@ func (r *NamespaceReconciler) setReconcileError(ctx context.Context, ns *corev1.
 	return r.Patch(ctx, ns, patch)
 }
 
-func (r *NamespaceReconciler) getNamespaceClass(ctx context.Context, ns corev1.Namespace) (*namespaceclassv1alpha1.NamespaceClass, error) {
+func (r *NamespaceReconciler) getNamespaceClass(ctx context.Context, ns *corev1.Namespace) (*namespaceclassv1alpha1.NamespaceClass, error) {
 	nsClassName, ok := ns.GetLabels()[namespaceClassLabel]
 	if !ok {
 		logf.FromContext(ctx).Info("Namespace does not have class label")
 		return nil, nil
 	}
 
-	var nsClass namespaceclassv1alpha1.NamespaceClass
-	return &nsClass, r.Get(ctx, client.ObjectKey{
-		Name: nsClassName,
-	}, &nsClass)
+	nsClass := &namespaceclassv1alpha1.NamespaceClass{}
+	if err := r.Get(ctx, client.ObjectKey{Name: nsClassName}, nsClass); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, nil
+		}
+
+		return nil, err
+	}
+
+	return nsClass, nil
 }
 
 func (r *NamespaceReconciler) mapClassToNamespaces(ctx context.Context, obj client.Object) []reconcile.Request {

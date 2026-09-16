@@ -112,14 +112,14 @@ data:
 
 		By("the watched ConfigMap getting created without a manual Reconcile call")
 		Eventually(func() error {
-			var cm corev1.ConfigMap
-			return k8sClient.Get(ctx, types.NamespacedName{Namespace: nsName, Name: cmName}, &cm)
+			cm := &corev1.ConfigMap{}
+			return k8sClient.Get(ctx, types.NamespacedName{Namespace: nsName, Name: cmName}, cm)
 		}).Should(Succeed())
 
 		By("the NamespaceClass's status converging to Ready")
 		Eventually(func(g Gomega) metav1.ConditionStatus {
-			var got namespaceclassv1alpha1.NamespaceClass
-			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: className}, &got)).To(Succeed())
+			got := &namespaceclassv1alpha1.NamespaceClass{}
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: className}, got)).To(Succeed())
 			cond := meta.FindStatusCondition(got.Status.Conditions, "Ready")
 			if cond == nil {
 				return metav1.ConditionUnknown
@@ -132,8 +132,8 @@ data:
 		Expect(k8sClient.Delete(ctx, class)).To(Succeed())
 
 		Eventually(func() bool {
-			var got namespaceclassv1alpha1.NamespaceClass
-			err := k8sClient.Get(ctx, types.NamespacedName{Name: className}, &got)
+			got := &namespaceclassv1alpha1.NamespaceClass{}
+			err := k8sClient.Get(ctx, types.NamespacedName{Name: className}, got)
 			return errors.IsNotFound(err)
 		}).Should(BeTrue())
 	})

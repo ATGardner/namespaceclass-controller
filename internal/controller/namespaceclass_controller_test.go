@@ -33,19 +33,14 @@ import (
 
 var _ = Describe("NamespaceClass Controller", func() {
 	Context("When reconciling a resource", func() {
-		const (
-			resourceName = "test-resource"
-		)
+		const resourceName = "test-resource"
 
+		typeNamespacedName := types.NamespacedName{Name: resourceName}
 		ctx := context.Background()
-
-		typeNamespacedName := types.NamespacedName{
-			Name: resourceName,
-		}
-		namespaceclass := &namespaceclassv1alpha1.NamespaceClass{}
 
 		BeforeEach(func() {
 			By("creating the custom resource for the Kind NamespaceClass")
+			namespaceclass := &namespaceclassv1alpha1.NamespaceClass{}
 			err := k8sClient.Get(ctx, typeNamespacedName, namespaceclass)
 			if err != nil && errors.IsNotFound(err) {
 				resource := &namespaceclassv1alpha1.NamespaceClass{

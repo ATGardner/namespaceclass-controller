@@ -50,17 +50,17 @@ const namespaceClassFinalizer = "namespaceclass.akuity.io/finalizer"
 func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
-	var nsClass namespaceclassv1alpha1.NamespaceClass
-	if err := r.Get(ctx, req.NamespacedName, &nsClass); err != nil {
+	nsClass := &namespaceclassv1alpha1.NamespaceClass{}
+	if err := r.Get(ctx, req.NamespacedName, nsClass); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
 	if nsClass.DeletionTimestamp.IsZero() {
-		if controllerutil.AddFinalizer(&nsClass, namespaceClassFinalizer) {
-			return ctrl.Result{}, r.Update(ctx, &nsClass)
+		if controllerutil.AddFinalizer(nsClass, namespaceClassFinalizer) {
+			return ctrl.Result{}, r.Update(ctx, nsClass)
 		}
 	} else {
-		return r.reconcileDelete(ctx, &nsClass)
+		return r.reconcileDelete(ctx, nsClass)
 	}
 
 	var nsList corev1.NamespaceList
@@ -85,7 +85,7 @@ func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		Message:            readyMessage(failing, len(nsList.Items)),
 	})
 
-	if err := r.Status().Update(ctx, &nsClass); err != nil {
+	if err := r.Status().Update(ctx, nsClass); err != nil {
 		log.Error(err, "Failed to update NamespaceClass status")
 		return ctrl.Result{}, err
 	}
