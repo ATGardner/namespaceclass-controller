@@ -21,10 +21,7 @@ import (
 	"encoding/json"
 	"slices"
 
-	namespaceclassv1alpha1 "github.com/atgardner/namespaceclass-controller/api/v1alpha1"
-
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -33,14 +30,19 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+
+	namespaceclassv1alpha1 "github.com/atgardner/namespaceclass-controller/api/v1alpha1"
 )
 
 // namespaceClassLabel marks a Namespace as managed by a NamespaceClass.
 const namespaceClassLabel = "namespaceclass.akuity.io/name"
+
+// parentClassLabel marks each resource with the NamespaceClass that createad it.
 const parentClassLabel = "namespaceclass.akuity.io/parent"
 
 // fieldOwner identifies this controller as the Server-Side Apply field
@@ -53,6 +55,8 @@ const fieldOwner = "namespaceclass-controller"
 // resource can be dropped from a class's spec (or the namespace can switch
 // classes) without leaving any current signal behind to find it by.
 const appliedResourcesAnnotation = "namespaceclass.akuity.io/applied-resources"
+
+const reconcileErrorAnnotation = "namespaceclass.akuity.io/reconcile-error"
 
 // appliedResource identifies one resource this controller manages in a
 // namespace. Group+Version+Kind+Name is the identity: it's already present
@@ -119,67 +123,65 @@ type NamespaceReconciler struct {
 // +kubebuilder:rbac:groups=core,resources=namespaces,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=*,resources=*,verbs=*
 
-func (r *NamespaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *NamespaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, reconcileErr error) {
 	log := logf.FromContext(ctx)
 
 	var namespace corev1.Namespace
 	if err := r.Get(ctx, req.NamespacedName, &namespace); err != nil {
-		if apierrors.IsNotFound(err) {
-			log.Info("Namespace resource not found. Ignoring since object must be deleted")
-			return ctrl.Result{}, nil
-		}
-
-		// Error reading the object - requeue the request.
-		log.Error(err, "Failed to get Namespace")
-		return ctrl.Result{}, err
+		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
 	nsClass, err := r.getNamespaceClass(ctx, namespace)
 	if err != nil {
-		if apierrors.IsNotFound(err) {
-			log.Info("NamespaceClass resource not found. Ignoring since object must be deleted")
-			return ctrl.Result{}, nil
-		}
-
-		// Error reading the object - requeue the request.
-		log.Error(err, "Failed to get NamespaceClass")
-		return ctrl.Result{}, err
-	}
-	if nsClass == nil {
-		// No class label (see getNamespaceClass) - nothing to reconcile.
-		return ctrl.Result{}, nil
+		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	log = log.WithValues("nsClass", nsClass.Name)
-	ctx = logf.IntoContext(ctx, log)
+	if nsClass != nil {
+		log = log.WithValues("nsClass", nsClass.Name)
+		ctx = logf.IntoContext(ctx, log)
+	}
 
-	desired := make([]appliedResource, len(nsClass.Spec.Resources))
-	for i := range nsClass.Spec.Resources {
-		// Deep-copy so mutations below don't alter the NamespaceClass's own
-		// in-memory spec, and so Server-Side Apply always sends the full
-		// desired content rather than whatever a prior Get left behind.
-		res := nsClass.Spec.Resources[i].DeepCopy()
-		// override any accidental "namespace" field that exist in the NamespaceClass spec
-		res.SetNamespace(namespace.Name)
-
-		resLabels := res.GetLabels()
-		if resLabels == nil {
-			resLabels = map[string]string{}
+	// Record this reconcile's outcome on the Namespace so the NamespaceClass
+	// aggregator (which only lists Namespaces, never re-runs this diff logic
+	// itself) can see it. Covers every return below this point; the early
+	// returns above intentionally don't have a Namespace/NamespaceClass pair
+	// worth reporting on yet.
+	defer func() {
+		if err := r.setReconcileError(ctx, &namespace, reconcileErr); err != nil {
+			log.Error(err, "Failed to record reconcile-error annotation")
 		}
-		resLabels[parentClassLabel] = nsClass.Name
-		res.SetLabels(resLabels)
+	}()
 
-		if err := controllerutil.SetControllerReference(nsClass, res, r.Scheme); err != nil {
-			log.Error(err, "Failed to set controller reference", "kind", res.GroupVersionKind().Kind, "name", res.GetName())
-			return ctrl.Result{}, err
+	var desired []appliedResource
+	if nsClass != nil && nsClass.DeletionTimestamp.IsZero() {
+		desired = make([]appliedResource, len(nsClass.Spec.Resources))
+		for i := range nsClass.Spec.Resources {
+			// Deep-copy so mutations below don't alter the NamespaceClass's own
+			// in-memory spec, and so Server-Side Apply always sends the full
+			// desired content rather than whatever a prior Get left behind.
+			res := nsClass.Spec.Resources[i].DeepCopy()
+			// override any accidental "namespace" field that exist in the NamespaceClass spec
+			res.SetNamespace(namespace.Name)
+
+			resLabels := res.GetLabels()
+			if resLabels == nil {
+				resLabels = map[string]string{}
+			}
+			resLabels[parentClassLabel] = nsClass.Name
+			res.SetLabels(resLabels)
+
+			if err := controllerutil.SetControllerReference(nsClass, res, r.Scheme); err != nil {
+				log.Error(err, "Failed to set controller reference", "kind", res.GroupVersionKind().Kind, "name", res.GetName())
+				return ctrl.Result{}, err
+			}
+
+			if err := r.Patch(ctx, res, client.Apply, client.ForceOwnership, client.FieldOwner(fieldOwner)); err != nil {
+				log.Error(err, "Failed to apply resource", "kind", res.GroupVersionKind().Kind, "name", res.GetName())
+				return ctrl.Result{}, err
+			}
+
+			desired[i] = toAppliedResource(res)
 		}
-
-		if err := r.Patch(ctx, res, client.Apply, client.ForceOwnership, client.FieldOwner(fieldOwner)); err != nil {
-			log.Error(err, "Failed to apply resource", "kind", res.GroupVersionKind().Kind, "name", res.GetName())
-			return ctrl.Result{}, err
-		}
-
-		desired[i] = toAppliedResource(res)
 	}
 
 	applied, err := readAppliedResources(&namespace)
@@ -224,10 +226,21 @@ func (r *NamespaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 // SetupWithManager sets up the controller with the Manager.
 func (r *NamespaceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&corev1.Namespace{}, builder.WithPredicates(predicate.NewPredicateFuncs(func(obj client.Object) bool {
-			_, ok := obj.GetLabels()[namespaceClassLabel]
-			return ok
-		}))).
+		For(&corev1.Namespace{}, builder.WithPredicates(predicate.Funcs{
+			CreateFunc: func(e event.CreateEvent) bool {
+				_, ok := e.Object.GetLabels()[namespaceClassLabel]
+				return ok
+			},
+			UpdateFunc: func(e event.UpdateEvent) bool {
+				_, oldOk := e.ObjectOld.GetLabels()[namespaceClassLabel]
+				_, newOk := e.ObjectNew.GetLabels()[namespaceClassLabel]
+				return oldOk || newOk
+			},
+			DeleteFunc: func(e event.DeleteEvent) bool {
+				_, ok := e.Object.GetLabels()[namespaceClassLabel]
+				return ok
+			},
+		})).
 		Watches(
 			&namespaceclassv1alpha1.NamespaceClass{},
 			handler.EnqueueRequestsFromMapFunc(r.mapClassToNamespaces),
@@ -236,12 +249,41 @@ func (r *NamespaceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-func (r *NamespaceReconciler) getNamespaceClass(ctx context.Context, ns corev1.Namespace) (*namespaceclassv1alpha1.NamespaceClass, error) {
-	log := logf.FromContext(ctx)
+// setReconcileError records reconcileErr's message (or clears the
+// annotation, on nil) as this Namespace's last reconcile outcome. Only
+// patches when the recorded value actually changes, so a healthy namespace
+// doesn't take a write on every reconcile.
+func (r *NamespaceReconciler) setReconcileError(ctx context.Context, ns *corev1.Namespace, reconcileErr error) error {
+	desired := ""
+	if reconcileErr != nil {
+		desired = reconcileErr.Error()
+	}
 
+	if ns.GetAnnotations()[reconcileErrorAnnotation] == desired {
+		return nil
+	}
+
+	patch := client.MergeFrom(ns.DeepCopy())
+	annotations := ns.GetAnnotations()
+	if annotations == nil {
+		annotations = map[string]string{}
+	}
+
+	if desired == "" {
+		delete(annotations, reconcileErrorAnnotation)
+	} else {
+		annotations[reconcileErrorAnnotation] = desired
+	}
+
+	ns.SetAnnotations(annotations)
+
+	return r.Patch(ctx, ns, patch)
+}
+
+func (r *NamespaceReconciler) getNamespaceClass(ctx context.Context, ns corev1.Namespace) (*namespaceclassv1alpha1.NamespaceClass, error) {
 	nsClassName, ok := ns.GetLabels()[namespaceClassLabel]
 	if !ok {
-		log.Info("Namespace does not have class label")
+		logf.FromContext(ctx).Info("Namespace does not have class label")
 		return nil, nil
 	}
 
@@ -274,9 +316,6 @@ func (r *NamespaceReconciler) deleteOrphanResource(ctx context.Context, res appl
 	u.SetGroupVersionKind(schema.GroupVersionKind{Group: res.Group, Version: res.Version, Kind: res.Kind})
 	u.SetName(res.Name)
 	u.SetNamespace(namespace)
-	if err := r.Delete(ctx, u); err != nil && !apierrors.IsNotFound(err) {
-		return err
-	}
-
-	return nil
+	err := r.Delete(ctx, u)
+	return client.IgnoreNotFound(err)
 }

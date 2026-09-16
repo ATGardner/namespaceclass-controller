@@ -119,6 +119,14 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              failingNamespaces:
+                description: |-
+                  failingNamespaces is the number of namespaces referencing this class
+                  that failed to converge to its desired resources on their last
+                  reconcile. Membership itself is discoverable on demand via
+                  `kubectl get namespace -l namespaceclass.akuity.io/name=<name>`; this
+                  field exists because failure isn't.
+                type: integer
             type: object
         required:
         - spec

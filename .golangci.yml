@@ -60,6 +60,10 @@ formatters:
   enable:
     - gofmt
     - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/atgardner/namespaceclass-controller
   exclusions:
     generated: lax
     paths:

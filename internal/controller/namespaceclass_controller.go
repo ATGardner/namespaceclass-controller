@@ -18,11 +18,19 @@ package controller
 
 import (
 	"context"
+	"fmt"
 
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	namespaceclassv1alpha1 "github.com/atgardner/namespaceclass-controller/api/v1alpha1"
 )
@@ -33,31 +41,124 @@ type NamespaceClassReconciler struct {
 	Scheme *runtime.Scheme
 }
 
+const namespaceClassFinalizer = "namespaceclass.akuity.io/finalizer"
+
 // +kubebuilder:rbac:groups=namespaceclass.akuity.io,resources=namespaceclasses,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=namespaceclass.akuity.io,resources=namespaceclasses/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=namespaceclass.akuity.io,resources=namespaceclasses/finalizers,verbs=update
 
-// Reconcile is part of the main kubernetes reconciliation loop which aims to
-// move the current state of the cluster closer to the desired state.
-// TODO(user): Modify the Reconcile function to compare the state specified by
-// the NamespaceClass object against the actual cluster state, and then
-// perform operations to make the cluster state reflect the state specified by
-// the user.
-//
-// For more details, check Reconcile and its Result here:
-// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.25.0/pkg/reconcile
 func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	_ = logf.FromContext(ctx)
+	log := logf.FromContext(ctx)
 
-	// TODO(user): your logic here
+	var nsClass namespaceclassv1alpha1.NamespaceClass
+	if err := r.Get(ctx, req.NamespacedName, &nsClass); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
 
+	if nsClass.DeletionTimestamp.IsZero() {
+		if controllerutil.AddFinalizer(&nsClass, namespaceClassFinalizer) {
+			return ctrl.Result{}, r.Update(ctx, &nsClass)
+		}
+	} else {
+		return r.reconcileDelete(ctx, &nsClass)
+	}
+
+	var nsList corev1.NamespaceList
+	if err := r.List(ctx, &nsList, client.MatchingLabels{namespaceClassLabel: nsClass.Name}); err != nil {
+		log.Error(err, "Failed to list referencing Namespaces")
+		return ctrl.Result{}, err
+	}
+
+	failing := 0
+	for _, ns := range nsList.Items {
+		if ns.GetAnnotations()[reconcileErrorAnnotation] != "" {
+			failing++
+		}
+	}
+
+	nsClass.Status.FailingNamespaces = failing
+	meta.SetStatusCondition(&nsClass.Status.Conditions, metav1.Condition{
+		Type:               "Ready",
+		Status:             boolToConditionStatus(failing == 0),
+		ObservedGeneration: nsClass.Generation,
+		Reason:             readyReason(failing),
+		Message:            readyMessage(failing, len(nsList.Items)),
+	})
+
+	if err := r.Status().Update(ctx, &nsClass); err != nil {
+		log.Error(err, "Failed to update NamespaceClass status")
+		return ctrl.Result{}, err
+	}
+
+	log.Info("Done reconciling NamespaceClass status", "namespaces", len(nsList.Items), "failing", failing)
 	return ctrl.Result{}, nil
+}
+
+func (r *NamespaceClassReconciler) reconcileDelete(ctx context.Context, nsClass *namespaceclassv1alpha1.NamespaceClass) (ctrl.Result, error) {
+	if !controllerutil.ContainsFinalizer(nsClass, namespaceClassFinalizer) {
+		return ctrl.Result{}, nil
+	}
+
+	var nsList corev1.NamespaceList
+	if err := r.List(ctx, &nsList, client.MatchingLabels{namespaceClassLabel: nsClass.Name}); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	for _, ns := range nsList.Items {
+		applied, err := readAppliedResources(&ns)
+		if err != nil || len(applied) > 0 {
+			// Still converging (or annotation unreadable — be conservative
+			// and wait rather than remove the finalizer prematurely).
+			return ctrl.Result{}, nil
+		}
+	}
+
+	controllerutil.RemoveFinalizer(nsClass, namespaceClassFinalizer)
+	return ctrl.Result{}, r.Update(ctx, nsClass)
+}
+
+// boolToConditionStatus converts a plain boolean into the tri-state
+// metav1.ConditionStatus the Conditions field expects.
+func boolToConditionStatus(ok bool) metav1.ConditionStatus {
+	if ok {
+		return metav1.ConditionTrue
+	}
+	return metav1.ConditionFalse
+}
+
+// readyReason is the CamelCase machine-readable Reason paired with the
+// Ready condition.
+func readyReason(failing int) string {
+	if failing == 0 {
+		return "AllNamespacesApplied"
+	}
+	return "NamespacesFailing"
+}
+
+// readyMessage is the human-readable detail paired with the Ready condition.
+func readyMessage(failing, total int) string {
+	if failing == 0 {
+		return fmt.Sprintf("All %d referencing namespace(s) have applied this class's resources", total)
+	}
+	return fmt.Sprintf("%d of %d referencing namespace(s) failed to apply this class's resources", failing, total)
 }
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *NamespaceClassReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&namespaceclassv1alpha1.NamespaceClass{}).
+		Watches(
+			&corev1.Namespace{},
+			handler.EnqueueRequestsFromMapFunc(r.mapNamespaceToClass),
+		).
 		Named("namespaceclass").
 		Complete(r)
+}
+
+func (r *NamespaceClassReconciler) mapNamespaceToClass(ctx context.Context, obj client.Object) []reconcile.Request {
+	className, ok := obj.GetLabels()[namespaceClassLabel]
+	if !ok {
+		return nil
+	}
+	return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: className}}}
 }
