@@ -151,10 +151,12 @@ build-installer: manifests generate kustomize ## Generate a consolidated YAML wi
 	mkdir -p dist
 	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG}
 	"$(KUSTOMIZE)" build config/default > dist/install.yaml
-	$(MAKE) helm-generate
 
+# NOTE: 'kubebuilder edit --plugins=helm/v2-alpha' always re-runs 'make build-installer' itself
+# to refresh dist/install.yaml, so this target must never be a prerequisite of build-installer
+# (directly or transitively) or the two recurse into each other indefinitely.
 .PHONY: helm-generate
-helm-generate: kubebuilder ## Regenerate the Helm chart in dist/chart from dist/install.yaml.
+helm-generate: kubebuilder ## Regenerate the Helm chart in dist/chart (also regenerates kustomize manifests).
 	"$(KUBEBUILDER)" edit --plugins=helm.kubebuilder.io/v2-alpha
 
 ##@ Deployment
