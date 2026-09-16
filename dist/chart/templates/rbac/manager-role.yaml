@@ -11,6 +11,20 @@ metadata:
   name: {{ include "namespaceclass-controller.resourceName" (dict "suffix" "manager-role" "context" $) }}
 rules:
 - apiGroups:
+  - ""
+  resources:
+  - namespaces
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - '*'
+  resources:
+  - '*'
+  verbs:
+  - '*'
+- apiGroups:
   - namespaceclass.akuity.io
   resources:
   - namespaceclasses

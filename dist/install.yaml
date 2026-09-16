@@ -20,7 +20,7 @@ spec:
     listKind: NamespaceClassList
     plural: namespaceclasses
     singular: namespaceclass
-  scope: Namespaced
+  scope: Cluster
   versions:
   - name: v1alpha1
     schema:
@@ -188,6 +188,22 @@ kind: ClusterRole
 metadata:
   name: namespaceclass-controller-manager-role
 rules:
+- apiGroups:
+  - ""
+  resources:
+  - namespaces
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - '*'
+  resources:
+  - '*'
+  verbs:
+  - '*'
 - apiGroups:
   - namespaceclass.akuity.io
   resources:
