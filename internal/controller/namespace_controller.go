@@ -18,13 +18,87 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
+	"slices"
+
+	namespaceclassv1alpha1 "github.com/atgardner/namespaceclass-controller/api/v1alpha1"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
+
+// namespaceClassLabel marks a Namespace as managed by a NamespaceClass.
+const namespaceClassLabel = "namespaceclass.akuity.io/name"
+const parentClassLabel = "namespaceclass.akuity.io/parent"
+
+// appliedResourcesAnnotation records, on the Namespace, the GVK+name of every
+// resource this controller applied on its last successful reconcile. It's
+// the source of truth for the diff — not a label selector — because a
+// resource can be dropped from a class's spec (or the namespace can switch
+// classes) without leaving any current signal behind to find it by.
+const appliedResourcesAnnotation = "namespaceclass.akuity.io/applied-resources"
+
+// appliedResource identifies one resource this controller manages in a
+// namespace. Group+Version+Kind+Name is the identity: it's already present
+// wherever the resource is defined, so no separate tracking key is needed.
+type appliedResource struct {
+	Group   string `json:"group"`
+	Version string `json:"version"`
+	Kind    string `json:"kind"`
+	Name    string `json:"name"`
+}
+
+// configMapAppliedResource is the appliedResource identity for a ConfigMap
+// with the given name.
+func configMapAppliedResource(name string) appliedResource {
+	return appliedResource{Version: "v1", Kind: "ConfigMap", Name: name}
+}
+
+// readAppliedResources returns the resources recorded from the last
+// successful reconcile, or nil if none are recorded yet.
+func readAppliedResources(ns *corev1.Namespace) ([]appliedResource, error) {
+	raw, ok := ns.GetAnnotations()[appliedResourcesAnnotation]
+	if !ok || raw == "" {
+		return nil, nil
+	}
+
+	var resources []appliedResource
+	if err := json.Unmarshal([]byte(raw), &resources); err != nil {
+		return nil, err
+	}
+
+	return resources, nil
+}
+
+// setAppliedResources records the given resources as the current applied set
+// on the Namespace.
+func setAppliedResources(ns *corev1.Namespace, resources []appliedResource) error {
+	raw, err := json.Marshal(resources)
+	if err != nil {
+		return err
+	}
+
+	annotations := ns.GetAnnotations()
+	if annotations == nil {
+		annotations = map[string]string{}
+	}
+
+	annotations[appliedResourcesAnnotation] = string(raw)
+	ns.SetAnnotations(annotations)
+
+	return nil
+}
 
 // NamespaceReconciler reconciles a Namespace object
 type NamespaceReconciler struct {
@@ -32,31 +106,161 @@ type NamespaceReconciler struct {
 	Scheme *runtime.Scheme
 }
 
-// +kubebuilder:rbac:groups=core,resources=namespaces,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=core,resources=namespaces/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=core,resources=namespaces/finalizers,verbs=update
+// +kubebuilder:rbac:groups=core,resources=namespaces,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=*,resources=*,verbs=*
 
-// Reconcile is part of the main kubernetes reconciliation loop which aims to
-// move the current state of the cluster closer to the desired state.
-// TODO(user): Modify the Reconcile function to compare the state specified by
-// the Namespace object against the actual cluster state, and then
-// perform operations to make the cluster state reflect the state specified by
-// the user.
-//
-// For more details, check Reconcile and its Result here:
-// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.25.0/pkg/reconcile
 func (r *NamespaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	_ = logf.FromContext(ctx)
+	log := logf.FromContext(ctx)
 
-	// TODO(user): your logic here
+	var namespace corev1.Namespace
+	if err := r.Get(ctx, req.NamespacedName, &namespace); err != nil {
+		if apierrors.IsNotFound(err) {
+			log.Info("Namespace resource not found. Ignoring since object must be deleted")
+			return ctrl.Result{}, nil
+		}
 
+		// Error reading the object - requeue the request.
+		log.Error(err, "Failed to get Namespace")
+		return ctrl.Result{}, err
+	}
+
+	nsClass, err := r.getNamespaceClass(ctx, namespace)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			log.Info("NamespaceClass resource not found. Ignoring since object must be deleted")
+			return ctrl.Result{}, nil
+		}
+
+		// Error reading the object - requeue the request.
+		log.Error(err, "Failed to get NamespaceClass")
+		return ctrl.Result{}, err
+	}
+	if nsClass == nil {
+		// No class label (see getNamespaceClass) - nothing to reconcile.
+		return ctrl.Result{}, nil
+	}
+
+	var desired []appliedResource
+	if nsClass.Spec.Foo != nil {
+		desired = []appliedResource{configMapAppliedResource(*nsClass.Spec.Foo)}
+	}
+
+	for _, res := range desired {
+		cm := &corev1.ConfigMap{
+			ObjectMeta: v1.ObjectMeta{
+				Name:      res.Name,
+				Namespace: namespace.Name,
+			},
+		}
+		if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, cm, func() error {
+			cmLabels := cm.GetLabels()
+			if cmLabels == nil {
+				cmLabels = map[string]string{}
+			}
+
+			cmLabels[parentClassLabel] = nsClass.Name
+			cm.SetLabels(cmLabels)
+			cm.Data = map[string]string{
+				"foo": "bar",
+			}
+			return controllerutil.SetControllerReference(nsClass, cm, r.Scheme)
+		}); err != nil {
+			log.Error(err, "Failed to create or update ConfigMap", "name", res.Name)
+			return ctrl.Result{}, err
+		}
+	}
+
+	applied, err := readAppliedResources(&namespace)
+	if err != nil {
+		// Unreadable record: treat as empty rather than fail reconciliation.
+		// The write below repairs it, and any orphan this misses is caught
+		// once its identity resurfaces in a future applied set.
+		log.Error(err, "Failed to parse applied-resources annotation, resetting it")
+		applied = nil
+	}
+
+	for _, res := range applied {
+		if slices.Contains(desired, res) {
+			continue
+		}
+		if res.Kind != "ConfigMap" {
+			// Nothing today records a non-ConfigMap entry; skip rather than
+			// guess how to delete a kind this controller doesn't manage yet.
+			log.Info("Skipping deletion of unsupported managed kind", "kind", res.Kind, "name", res.Name)
+			continue
+		}
+
+		cm := &corev1.ConfigMap{ObjectMeta: v1.ObjectMeta{Name: res.Name, Namespace: namespace.Name}}
+		if err := r.Delete(ctx, cm); err != nil && !apierrors.IsNotFound(err) {
+			log.Error(err, "Failed to delete stale resource", "kind", res.Kind, "name", res.Name)
+			return ctrl.Result{}, err
+		}
+
+		log.Info("Deleted stale resource", "kind", res.Kind, "name", res.Name)
+	}
+
+	if !slices.Equal(applied, desired) {
+		patch := client.MergeFrom(namespace.DeepCopy())
+		if err := setAppliedResources(&namespace, desired); err != nil {
+			log.Error(err, "Failed to encode applied-resources annotation")
+			return ctrl.Result{}, err
+		}
+
+		if err := r.Patch(ctx, &namespace, patch); err != nil {
+			log.Error(err, "Failed to update applied-resources annotation")
+			return ctrl.Result{}, err
+		}
+	}
+
+	log.Info("Done reconciling Namespace", "resources", desired)
 	return ctrl.Result{}, nil
 }
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *NamespaceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&corev1.Namespace{}).
+		For(&corev1.Namespace{}, builder.WithPredicates(predicate.NewPredicateFuncs(func(obj client.Object) bool {
+			_, ok := obj.GetLabels()[namespaceClassLabel]
+			return ok
+		}))).
+		Watches(
+			&namespaceclassv1alpha1.NamespaceClass{},
+			handler.EnqueueRequestsFromMapFunc(r.mapClassToNamespaces),
+		).
 		Named("namespace").
 		Complete(r)
+}
+
+func (r *NamespaceReconciler) getNamespaceClass(ctx context.Context, ns corev1.Namespace) (*namespaceclassv1alpha1.NamespaceClass, error) {
+	log := logf.FromContext(ctx)
+
+	nsClassName, ok := ns.GetLabels()[namespaceClassLabel]
+	if !ok {
+		log.Info("Namespace does not have class label")
+		return nil, nil
+	}
+
+	log = log.WithValues("nsClass", nsClassName)
+	var nsClass namespaceclassv1alpha1.NamespaceClass
+	return &nsClass, r.Get(ctx, client.ObjectKey{
+		Name: nsClassName,
+	}, &nsClass)
+}
+
+func (r *NamespaceReconciler) mapClassToNamespaces(ctx context.Context, obj client.Object) []reconcile.Request {
+	log := logf.FromContext(ctx)
+
+	class := obj.(*namespaceclassv1alpha1.NamespaceClass)
+	var nsList corev1.NamespaceList
+	if err := r.List(ctx, &nsList, client.MatchingLabels{namespaceClassLabel: class.Name}); err != nil {
+		return nil
+	}
+
+	reqs := make([]ctrl.Request, len(nsList.Items))
+	for i, ns := range nsList.Items {
+		reqs[i] = ctrl.Request{NamespacedName: types.NamespacedName{Name: ns.Name}}
+	}
+
+	log.Info("Generating requests for Namespaces", "count", len(nsList.Items))
+	return reqs
 }
