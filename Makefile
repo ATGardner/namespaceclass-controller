@@ -157,7 +157,12 @@ build-installer: manifests generate kustomize ## Generate a consolidated YAML wi
 # (directly or transitively) or the two recurse into each other indefinitely.
 .PHONY: helm-generate
 helm-generate: kubebuilder ## Regenerate the Helm chart in dist/chart (also regenerates kustomize manifests).
-	"$(KUBEBUILDER)" edit --plugins=helm.kubebuilder.io/v2-alpha
+	# --force alone does not prune files the generator no longer produces —
+	# verified directly: a stray file in dist/chart/templates survives a
+	# --force run untouched. Removing the directory first is what actually
+	# guarantees no stale/orphaned templates survive a regeneration.
+	rm -rf dist/chart
+	"$(KUBEBUILDER)" edit --plugins=helm.kubebuilder.io/v2-alpha --force
 
 ##@ Deployment
 
