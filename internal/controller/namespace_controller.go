@@ -111,6 +111,7 @@ func (r *NamespaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 				return ctrl.Result{}, fmt.Errorf("failed to get final resource %s/%s: %w", orig.GroupVersionKind().Kind, orig.GetName(), err)
 			}
 
+			//nolint:staticcheck // client.Apply is deprecated in favor of client.Client.Apply(), which requires typed apply configurations we don't have for arbitrary unstructured resources
 			if err := r.Patch(ctx, res, client.Apply, client.ForceOwnership, client.FieldOwner(common.FieldOwner)); err != nil {
 				log.Error(err, "Failed to apply resource", "kind", res.GroupVersionKind().Kind, "name", res.GetName())
 				return ctrl.Result{}, fmt.Errorf("failed to apply resource %s/%s: %w", res.GroupVersionKind().Kind, res.GetName(), err)

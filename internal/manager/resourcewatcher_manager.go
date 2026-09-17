@@ -35,11 +35,11 @@ type (
 	}
 )
 
-func New(cache cache.Cache, client client.Client, controller controller.TypedController[reconcile.Request]) ResourceWatcherManager {
+func New(c cache.Cache, clnt client.Client, ctrlr controller.TypedController[reconcile.Request]) ResourceWatcherManager {
 	return &resourceWatcherManager{
-		cache:      cache,
-		client:     client,
-		controller: controller,
+		cache:      c,
+		client:     clnt,
+		controller: ctrlr,
 		watchers:   sets.New[schema.GroupVersionKind](),
 	}
 }
@@ -110,7 +110,7 @@ func (r *resourceWatcherManager) getAllGVKs(ctx context.Context) (sets.Set[schem
 func (r *resourceWatcherManager) addWatcher(gvk schema.GroupVersionKind) error {
 	targetObj := &unstructured.Unstructured{}
 	targetObj.SetGroupVersionKind(gvk)
-	source := source.Kind[client.Object](
+	src := source.Kind[client.Object](
 		r.cache,
 		targetObj,
 		handler.EnqueueRequestsFromMapFunc(mapNamespaceForRes),
@@ -126,7 +126,7 @@ func (r *resourceWatcherManager) addWatcher(gvk schema.GroupVersionKind) error {
 			},
 		},
 	)
-	return r.controller.Watch(source)
+	return r.controller.Watch(src)
 }
 
 func (r *resourceWatcherManager) removeWatcher(ctx context.Context, gvk schema.GroupVersionKind) error {
