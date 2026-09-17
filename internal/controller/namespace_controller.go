@@ -125,7 +125,7 @@ func templateResourceNamespace(u *unstructured.Unstructured, namespace string) (
 		return nil, fmt.Errorf("failed marshaling resource %s: %w", u.GetName(), err)
 	}
 
-	t, err := template.New("tmpl").Parse(string(data))
+	t, err := template.New("tmpl").Option("missingkey=error").Parse(string(data))
 	if err != nil {
 		return nil, fmt.Errorf("failed creating template for resource %s: %w", u.GetName(), err)
 	}

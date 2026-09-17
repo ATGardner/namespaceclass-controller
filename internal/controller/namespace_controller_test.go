@@ -371,4 +371,41 @@ data:
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: ns.Name}, ns)).To(Succeed())
 		Expect(ns.Annotations[reconcileErrorAnnotation]).To(BeEmpty())
 	})
+
+	It("resolves {{ .namespace }} in an applied resource's data", func() {
+		class := &namespaceclassv1alpha1.NamespaceClass{
+			ObjectMeta: metav1.ObjectMeta{Name: "templated-class"},
+			Spec: namespaceclassv1alpha1.NamespaceClassSpec{
+				Resources: []unstructured.Unstructured{toUnstructured(`
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: templated-cm
+data:
+  owner: "{{ .namespace }}"
+`)},
+			},
+		}
+		Expect(k8sClient.Create(ctx, class)).To(Succeed())
+		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, class)).To(Succeed()) })
+
+		ns := &corev1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   "templated-ns",
+				Labels: map[string]string{namespaceClassLabel: class.Name},
+			},
+		}
+		Expect(k8sClient.Create(ctx, ns)).To(Succeed())
+		DeferCleanup(func() { forceDeleteNamespace(ctx, ns) })
+
+		reconciler := &NamespaceReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+		req := reconcile.Request{NamespacedName: types.NamespacedName{Name: ns.Name}}
+
+		_, err := reconciler.Reconcile(ctx, req)
+		Expect(err).NotTo(HaveOccurred())
+
+		var cm corev1.ConfigMap
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns.Name, Name: "templated-cm"}, &cm)).To(Succeed())
+		Expect(cm.Data["owner"]).To(Equal(ns.Name))
+	})
 })
