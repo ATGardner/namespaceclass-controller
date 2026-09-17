@@ -35,13 +35,15 @@ import (
 	namespaceclassv1alpha1 "github.com/atgardner/namespaceclass-controller/api/v1alpha1"
 )
 
+const namespaceClassFinalizer = "namespaceclass.akuity.io/finalizer"
+
 // NamespaceClassReconciler reconciles a NamespaceClass object
 type NamespaceClassReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
-}
 
-const namespaceClassFinalizer = "namespaceclass.akuity.io/finalizer"
+	mgr ctrl.Manager
+}
 
 // +kubebuilder:rbac:groups=namespaceclass.akuity.io,resources=namespaceclasses,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=namespaceclass.akuity.io,resources=namespaceclasses/status,verbs=get;update;patch
@@ -94,6 +96,19 @@ func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	return ctrl.Result{}, nil
 }
 
+// SetupWithManager sets up the controller with the Manager.
+func (r *NamespaceClassReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	r.mgr = mgr
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&namespaceclassv1alpha1.NamespaceClass{}).
+		Watches(
+			&corev1.Namespace{},
+			handler.EnqueueRequestsFromMapFunc(r.mapNamespaceToClass),
+		).
+		Named("namespaceclass").
+		Complete(r)
+}
+
 func (r *NamespaceClassReconciler) reconcileDelete(ctx context.Context, nsClass *namespaceclassv1alpha1.NamespaceClass) (ctrl.Result, error) {
 	if !controllerutil.ContainsFinalizer(nsClass, namespaceClassFinalizer) {
 		return ctrl.Result{}, nil
@@ -115,6 +130,15 @@ func (r *NamespaceClassReconciler) reconcileDelete(ctx context.Context, nsClass 
 
 	controllerutil.RemoveFinalizer(nsClass, namespaceClassFinalizer)
 	return ctrl.Result{}, r.Update(ctx, nsClass)
+}
+
+func (r *NamespaceClassReconciler) mapNamespaceToClass(ctx context.Context, obj client.Object) []reconcile.Request {
+	className, ok := obj.GetLabels()[namespaceClassLabel]
+	if !ok {
+		return nil
+	}
+
+	return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: className}}}
 }
 
 // boolToConditionStatus converts a plain boolean into the tri-state
@@ -141,24 +165,4 @@ func readyMessage(failing, total int) string {
 		return fmt.Sprintf("All %d referencing namespace(s) have applied this class's resources", total)
 	}
 	return fmt.Sprintf("%d of %d referencing namespace(s) failed to apply this class's resources", failing, total)
-}
-
-// SetupWithManager sets up the controller with the Manager.
-func (r *NamespaceClassReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
-		For(&namespaceclassv1alpha1.NamespaceClass{}).
-		Watches(
-			&corev1.Namespace{},
-			handler.EnqueueRequestsFromMapFunc(r.mapNamespaceToClass),
-		).
-		Named("namespaceclass").
-		Complete(r)
-}
-
-func (r *NamespaceClassReconciler) mapNamespaceToClass(ctx context.Context, obj client.Object) []reconcile.Request {
-	className, ok := obj.GetLabels()[namespaceClassLabel]
-	if !ok {
-		return nil
-	}
-	return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: className}}}
 }

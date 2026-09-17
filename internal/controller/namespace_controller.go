@@ -73,79 +73,6 @@ type appliedResource struct {
 	Name    string `json:"name"`
 }
 
-// configMapAppliedResource is the appliedResource identity for a ConfigMap
-// with the given name.
-func toAppliedResource(u *unstructured.Unstructured) appliedResource {
-	return appliedResource{
-		Group:   u.GroupVersionKind().Group,
-		Version: u.GroupVersionKind().Version,
-		Kind:    u.GetKind(),
-		Name:    u.GetName(),
-	}
-}
-
-// readAppliedResources returns the resources recorded from the last
-// successful reconcile, or nil if none are recorded yet.
-func readAppliedResources(ns *corev1.Namespace) ([]appliedResource, error) {
-	raw, ok := ns.GetAnnotations()[appliedResourcesAnnotation]
-	if !ok || raw == "" {
-		return nil, nil
-	}
-
-	var resources []appliedResource
-	if err := json.Unmarshal([]byte(raw), &resources); err != nil {
-		return nil, err
-	}
-
-	return resources, nil
-}
-
-// setAppliedResources records the given resources as the current applied set
-// on the Namespace.
-func setAppliedResources(ns *corev1.Namespace, resources []appliedResource) error {
-	raw, err := json.Marshal(resources)
-	if err != nil {
-		return err
-	}
-
-	annotations := ns.GetAnnotations()
-	if annotations == nil {
-		annotations = map[string]string{}
-	}
-
-	annotations[appliedResourcesAnnotation] = string(raw)
-	ns.SetAnnotations(annotations)
-
-	return nil
-}
-
-func templateResourceNamespace(u *unstructured.Unstructured, namespace string) (*unstructured.Unstructured, error) {
-	data, err := yaml.Marshal(u)
-	if err != nil {
-		return nil, fmt.Errorf("failed marshaling resource %s: %w", u.GetName(), err)
-	}
-
-	t, err := template.New("tmpl").Option("missingkey=error").Parse(string(data))
-	if err != nil {
-		return nil, fmt.Errorf("failed creating template for resource %s: %w", u.GetName(), err)
-	}
-
-	var buf bytes.Buffer
-	if err := t.Execute(&buf, map[string]string{
-		"namespace": namespace,
-	}); err != nil {
-		return nil, fmt.Errorf("failed executing template for resource %s: %w", u.GetName(), err)
-	}
-
-	res := &unstructured.Unstructured{}
-	err = yaml.Unmarshal(buf.Bytes(), res)
-	if err != nil {
-		return nil, fmt.Errorf("failed to unmarshal generated YAML for resource %s: %w", u.GetName(), err)
-	}
-
-	return res, nil
-}
-
 // NamespaceReconciler reconciles a Namespace object
 type NamespaceReconciler struct {
 	client.Client
@@ -368,4 +295,77 @@ func (r *NamespaceReconciler) deleteOrphanResource(ctx context.Context, res appl
 	u.SetNamespace(namespace)
 	err := r.Delete(ctx, u)
 	return client.IgnoreNotFound(err)
+}
+
+// configMapAppliedResource is the appliedResource identity for a ConfigMap
+// with the given name.
+func toAppliedResource(u *unstructured.Unstructured) appliedResource {
+	return appliedResource{
+		Group:   u.GroupVersionKind().Group,
+		Version: u.GroupVersionKind().Version,
+		Kind:    u.GetKind(),
+		Name:    u.GetName(),
+	}
+}
+
+// readAppliedResources returns the resources recorded from the last
+// successful reconcile, or nil if none are recorded yet.
+func readAppliedResources(ns *corev1.Namespace) ([]appliedResource, error) {
+	raw, ok := ns.GetAnnotations()[appliedResourcesAnnotation]
+	if !ok || raw == "" {
+		return nil, nil
+	}
+
+	var resources []appliedResource
+	if err := json.Unmarshal([]byte(raw), &resources); err != nil {
+		return nil, err
+	}
+
+	return resources, nil
+}
+
+// setAppliedResources records the given resources as the current applied set
+// on the Namespace.
+func setAppliedResources(ns *corev1.Namespace, resources []appliedResource) error {
+	raw, err := json.Marshal(resources)
+	if err != nil {
+		return err
+	}
+
+	annotations := ns.GetAnnotations()
+	if annotations == nil {
+		annotations = map[string]string{}
+	}
+
+	annotations[appliedResourcesAnnotation] = string(raw)
+	ns.SetAnnotations(annotations)
+
+	return nil
+}
+
+func templateResourceNamespace(u *unstructured.Unstructured, namespace string) (*unstructured.Unstructured, error) {
+	data, err := yaml.Marshal(u)
+	if err != nil {
+		return nil, fmt.Errorf("failed marshaling resource %s: %w", u.GetName(), err)
+	}
+
+	t, err := template.New("tmpl").Option("missingkey=error").Parse(string(data))
+	if err != nil {
+		return nil, fmt.Errorf("failed creating template for resource %s: %w", u.GetName(), err)
+	}
+
+	var buf bytes.Buffer
+	if err := t.Execute(&buf, map[string]string{
+		"namespace": namespace,
+	}); err != nil {
+		return nil, fmt.Errorf("failed executing template for resource %s: %w", u.GetName(), err)
+	}
+
+	res := &unstructured.Unstructured{}
+	err = yaml.Unmarshal(buf.Bytes(), res)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal generated YAML for resource %s: %w", u.GetName(), err)
+	}
+
+	return res, nil
 }
