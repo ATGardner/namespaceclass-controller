@@ -41,8 +41,6 @@ const namespaceClassFinalizer = "namespaceclass.akuity.io/finalizer"
 type NamespaceClassReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
-
-	mgr ctrl.Manager
 }
 
 // +kubebuilder:rbac:groups=namespaceclass.akuity.io,resources=namespaceclasses,verbs=get;list;watch;create;update;patch;delete
@@ -98,12 +96,11 @@ func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *NamespaceClassReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	r.mgr = mgr
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&namespaceclassv1alpha1.NamespaceClass{}).
 		Watches(
 			&corev1.Namespace{},
-			handler.EnqueueRequestsFromMapFunc(r.mapNamespaceToClass),
+			handler.EnqueueRequestsFromMapFunc(mapNamespaceToClass),
 		).
 		Named("namespaceclass").
 		Complete(r)
@@ -132,15 +129,6 @@ func (r *NamespaceClassReconciler) reconcileDelete(ctx context.Context, nsClass 
 	return ctrl.Result{}, r.Update(ctx, nsClass)
 }
 
-func (r *NamespaceClassReconciler) mapNamespaceToClass(ctx context.Context, obj client.Object) []reconcile.Request {
-	className, ok := obj.GetLabels()[namespaceClassLabel]
-	if !ok {
-		return nil
-	}
-
-	return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: className}}}
-}
-
 // boolToConditionStatus converts a plain boolean into the tri-state
 // metav1.ConditionStatus the Conditions field expects.
 func boolToConditionStatus(ok bool) metav1.ConditionStatus {
@@ -165,4 +153,13 @@ func readyMessage(failing, total int) string {
 		return fmt.Sprintf("All %d referencing namespace(s) have applied this class's resources", total)
 	}
 	return fmt.Sprintf("%d of %d referencing namespace(s) failed to apply this class's resources", failing, total)
+}
+
+func mapNamespaceToClass(ctx context.Context, obj client.Object) []reconcile.Request {
+	className, ok := obj.GetLabels()[namespaceClassLabel]
+	if !ok {
+		return nil
+	}
+
+	return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: className}}}
 }

@@ -25,10 +25,12 @@ import (
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -159,8 +161,11 @@ func main() {
 	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:                 scheme,
-		Metrics:                metricsServerOptions,
+		Scheme:  scheme,
+		Metrics: metricsServerOptions,
+		Cache: cache.Options{
+			DefaultTransform: transformFn,
+		},
 		WebhookServer:          webhookServer,
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
@@ -212,4 +217,20 @@ func main() {
 		setupLog.Error(err, "Failed to run manager")
 		os.Exit(1)
 	}
+}
+
+func transformFn(o any) (any, error) {
+	u, ok := o.(*unstructured.Unstructured)
+	if !ok {
+		return o, nil
+	}
+
+	// gvk := u.GetObjectKind().GroupVersionKind()
+	res := &unstructured.Unstructured{}
+	res.SetGroupVersionKind(u.GetObjectKind().GroupVersionKind())
+	res.SetName(u.GetName())
+	res.SetNamespace(u.GetNamespace())
+	res.SetLabels(u.GetLabels())
+	res.SetResourceVersion(u.GetResourceVersion())
+	return res, nil
 }

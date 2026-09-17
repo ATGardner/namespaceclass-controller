@@ -20,6 +20,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/sets"
 )
 
 // NamespaceClassSpec defines the desired state of NamespaceClass
@@ -90,4 +92,13 @@ func init() {
 		s.AddKnownTypes(SchemeGroupVersion, &NamespaceClass{}, &NamespaceClassList{})
 		return nil
 	})
+}
+
+func (n *NamespaceClass) GetGvks() sets.Set[schema.GroupVersionKind] {
+	set := sets.New[schema.GroupVersionKind]()
+	for _, res := range n.Spec.Resources {
+		set.Insert(res.GetObjectKind().GroupVersionKind())
+	}
+
+	return set
 }

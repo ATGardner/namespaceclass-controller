@@ -30,15 +30,19 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 	"sigs.k8s.io/yaml"
 
 	namespaceclassv1alpha1 "github.com/atgardner/namespaceclass-controller/api/v1alpha1"
@@ -77,6 +81,10 @@ type appliedResource struct {
 type NamespaceReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+
+	controller controller.TypedController[reconcile.Request]
+	cache      cache.Cache
+	watchers   sets.Set[schema.GroupVersionKind]
 }
 
 // +kubebuilder:rbac:groups=core,resources=namespaces,verbs=get;list;watch;update;patch
@@ -84,6 +92,10 @@ type NamespaceReconciler struct {
 
 func (r *NamespaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, reconcileErr error) {
 	log := logf.FromContext(ctx)
+
+	if err := r.maintainResourceWatchers(ctx); err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed maintaining resource matchers: %w", err)
+	}
 
 	namespace := &corev1.Namespace{}
 	if err := r.Get(ctx, req.NamespacedName, namespace); err != nil {
@@ -172,7 +184,11 @@ func (r *NamespaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *NamespaceReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
+	var err error
+
+	r.watchers = sets.New[schema.GroupVersionKind]()
+	r.cache = mgr.GetCache()
+	r.controller, err = ctrl.NewControllerManagedBy(mgr).
 		For(&corev1.Namespace{}, builder.WithPredicates(predicate.Funcs{
 			CreateFunc: func(e event.CreateEvent) bool {
 				_, ok := e.Object.GetLabels()[namespaceClassLabel]
@@ -193,7 +209,8 @@ func (r *NamespaceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			handler.EnqueueRequestsFromMapFunc(r.mapClassToNamespaces),
 		).
 		Named("namespace").
-		Complete(r)
+		Build(r)
+	return err
 }
 
 // setReconcileError records reconcileErr's message (or clears the
@@ -297,6 +314,83 @@ func (r *NamespaceReconciler) deleteOrphanResource(ctx context.Context, res appl
 	return client.IgnoreNotFound(err)
 }
 
+func (r *NamespaceReconciler) maintainResourceWatchers(ctx context.Context) error {
+	log := logf.FromContext(ctx)
+
+	allGvks, err := r.getAllGVKs(ctx)
+	if err != nil {
+		return err
+	}
+
+	for gvk := range allGvks {
+		if _, exists := r.watchers[gvk]; !exists {
+			if err := r.addWatcher(gvk); err != nil {
+				return fmt.Errorf("failed adding watcher for %s: %w", gvk, err)
+			}
+
+			r.watchers.Insert(gvk)
+			log.Info("Added watcher", "gvk", gvk)
+		}
+	}
+
+	for gvk := range r.watchers {
+		if !allGvks.Has(gvk) {
+			if err := r.removeWatcher(ctx, gvk); err != nil {
+				return fmt.Errorf("failed removing watcher for %s: %w", gvk, err)
+			}
+
+			r.watchers.Delete(gvk)
+			log.Info("Removed watcher", "gvk", gvk)
+		}
+	}
+
+	log.Info("Done maintaining resource watchers", "#watchers", len(r.watchers))
+	return nil
+}
+
+func (r *NamespaceReconciler) getAllGVKs(ctx context.Context) (sets.Set[schema.GroupVersionKind], error) {
+	list := &namespaceclassv1alpha1.NamespaceClassList{}
+	if err := r.Client.List(ctx, list); err != nil {
+		return nil, fmt.Errorf("failed getting NamespaceClassList: %w", err)
+	}
+
+	res := sets.New[schema.GroupVersionKind]()
+	for _, nsClass := range list.Items {
+		s := nsClass.GetGvks()
+		res = res.Union(s)
+	}
+
+	return res, nil
+}
+
+func (r *NamespaceReconciler) addWatcher(gvk schema.GroupVersionKind) error {
+	targetObj := &unstructured.Unstructured{}
+	targetObj.SetGroupVersionKind(gvk)
+	source := source.Kind[client.Object](
+		r.cache,
+		targetObj,
+		handler.EnqueueRequestsFromMapFunc(mapNamespaceForRes),
+		predicate.Funcs{
+			CreateFunc: func(e event.CreateEvent) bool {
+				return true
+			},
+			UpdateFunc: func(e event.UpdateEvent) bool {
+				return e.ObjectOld.GetResourceVersion() != e.ObjectNew.GetResourceVersion()
+			},
+			DeleteFunc: func(e event.DeleteEvent) bool {
+				return true
+			},
+		},
+	)
+	return r.controller.Watch(source)
+}
+
+func (r *NamespaceReconciler) removeWatcher(ctx context.Context, gvk schema.GroupVersionKind) error {
+	targetObj := &unstructured.Unstructured{}
+	targetObj.SetGroupVersionKind(gvk)
+	return r.cache.RemoveInformer(ctx, targetObj)
+}
+
 // configMapAppliedResource is the appliedResource identity for a ConfigMap
 // with the given name.
 func toAppliedResource(u *unstructured.Unstructured) appliedResource {
@@ -368,4 +462,13 @@ func templateResourceNamespace(u *unstructured.Unstructured, namespace string) (
 	}
 
 	return res, nil
+}
+
+func mapNamespaceForRes(ctx context.Context, obj client.Object) []reconcile.Request {
+	_, ok := obj.GetLabels()[parentClassLabel]
+	if !ok {
+		return nil
+	}
+
+	return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: obj.GetNamespace()}}}
 }
