@@ -321,3 +321,24 @@ helm-history: ## Show Helm release history.
 .PHONY: helm-rollback
 helm-rollback: ## Rollback to previous Helm release.
 	$(HELM) rollback $(HELM_RELEASE) --namespace $(HELM_NAMESPACE)
+
+##@ Helm Release
+
+## OCI registry the chart is pushed to (as <HELM_OCI_REGISTRY>/namespaceclass-controller).
+HELM_OCI_REGISTRY ?= oci://ghcr.io/atgardner/charts
+
+.PHONY: helm-package
+helm-package: install-helm ## Package dist/chart for release. Requires VERSION; IMG (repository, tag ignored) sets the default image.
+	@[ -n "$(VERSION)" ] || { echo "VERSION must be set, e.g. make helm-package VERSION=1.2.3 IMG=ghcr.io/atgardner/namespaceclass-controller"; exit 1; }
+	rm -rf dist/chart-release
+	cp -r $(HELM_CHART_DIR) dist/chart-release
+	IMG="$(IMG)"; sed -i.bak -E "s|repository: controller|repository: $${IMG%:*}|" dist/chart-release/values.yaml
+	rm -f dist/chart-release/values.yaml.bak
+	$(HELM) lint dist/chart-release
+	$(HELM) package dist/chart-release --destination dist --version $(VERSION) --app-version $(VERSION)
+	rm -rf dist/chart-release
+
+.PHONY: helm-push
+helm-push: install-helm ## Push the chart packaged by helm-package to HELM_OCI_REGISTRY. Requires VERSION.
+	@[ -n "$(VERSION)" ] || { echo "VERSION must be set, e.g. make helm-push VERSION=1.2.3"; exit 1; }
+	$(HELM) push dist/namespaceclass-controller-$(VERSION).tgz $(HELM_OCI_REGISTRY)

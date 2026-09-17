@@ -1,0 +1,71 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions: {}
+
+jobs:
+  release:
+    permissions:
+      contents: write
+      packages: write
+    name: Build and publish image + Helm chart
+    runs-on: ubuntu-latest
+    env:
+      IMAGE: ghcr.io/atgardner/namespaceclass-controller
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+
+      - name: Derive version from tag
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Build and push image
+        run: |
+          make docker-build IMG=$IMAGE:$VERSION
+          make docker-push IMG=$IMAGE:$VERSION
+
+      - name: Install Helm
+        run: make install-helm
+
+      - name: Log in to GHCR (Helm)
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Package and push Helm chart
+        run: |
+          make helm-package VERSION=$VERSION IMG=$IMAGE:$VERSION
+          make helm-push VERSION=$VERSION
+
+      - name: Create GitHub release
+        run: |
+          # Package pages take a moment to appear in the API right after a push.
+          fetch_package_url() {
+            for _ in 1 2 3 4 5; do
+              url=$(gh api "users/atgardner/packages/container/$1" --jq .html_url 2>/dev/null) && [ -n "$url" ] && { echo "$url"; return 0; }
+              sleep 5
+            done
+            echo "https://github.com/atgardner?tab=packages"
+          }
+          IMAGE_URL=$(fetch_package_url namespaceclass-controller)
+          CHART_URL=$(fetch_package_url charts%2Fnamespaceclass-controller)
+
+          sed -e "s|__VERSION__|$VERSION|g" \
+              -e "s|__IMAGE_URL__|$IMAGE_URL|g" \
+              -e "s|__CHART_URL__|$CHART_URL|g" \
+              .github/release-notes-template.md > release-notes.md
+
+          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file release-notes.md

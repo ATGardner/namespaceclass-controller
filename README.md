@@ -4,6 +4,23 @@
 ## Description
 // TODO(user): An in-depth paragraph about your project and overview of use
 
+## Quick Install
+
+The controller image and Helm chart are published to GHCR on every tagged
+release (see `.github/workflows/release.yml`). To run it in any cluster,
+no local build required:
+
+```sh
+helm install namespaceclass-controller \
+  oci://ghcr.io/atgardner/charts/namespaceclass-controller \
+  --version <released-version> \
+  --namespace namespaceclass-controller-system \
+  --create-namespace
+```
+
+Then apply a `NamespaceClass` and label a namespace with
+`namespaceclass.akuity.io/name=<class-name>` — see `config/samples/`.
+
 ## Getting Started
 
 ### Prerequisites
@@ -94,21 +111,17 @@ kubectl apply -f https://raw.githubusercontent.com/<org>/namespaceclass-controll
 
 ### By providing a Helm Chart
 
-1. Build the chart using the optional helm plugin
+The chart lives under `dist/chart` and is regenerated with `make helm-generate`
+whenever the CRDs or RBAC change. Releasing it (building the image, packaging
+the chart, and pushing both to GHCR) happens automatically on every `v*.*.*`
+tag push — see `.github/workflows/release.yml` and the
+[Quick Install](#quick-install) section above. To do the same thing locally:
 
 ```sh
-kubebuilder edit --plugins=helm/v2-alpha
+make docker-build docker-push IMG=ghcr.io/<you>/namespaceclass-controller:<version>
+make helm-package VERSION=<version> IMG=ghcr.io/<you>/namespaceclass-controller:<version>
+make helm-push VERSION=<version> HELM_OCI_REGISTRY=oci://ghcr.io/<you>/charts
 ```
-
-2. See that a chart was generated under 'dist/chart', and users
-can obtain this solution from there.
-
-**NOTE:** If you change the project, you need to update the Helm Chart
-using the same command above to sync the latest changes. Furthermore,
-if you create webhooks, you need to use the above command with
-the '--force' flag and manually ensure that any custom configuration
-previously added to 'dist/chart/values.yaml' or 'dist/chart/manager/manager.yaml'
-is manually re-applied afterwards.
 
 ## Contributing
 // TODO(user): Add detailed information on how you would like others to contribute to this project
