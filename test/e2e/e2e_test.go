@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -32,6 +33,11 @@ import (
 
 	"github.com/atgardner/namespaceclass-controller/test/utils"
 )
+
+// namespaceClassLabel is namespaceclassv1alpha1's label key, duplicated here
+// as a literal since these tests only ever speak to the cluster through
+// kubectl, never by importing the controller's own Go types.
+const namespaceClassLabel = "namespaceclass.akuity.io/name"
 
 // namespace where the project is deployed in
 const namespace = "namespaceclass-controller-system"
@@ -269,16 +275,162 @@ var _ = Describe("Manager", Ordered, func() {
 		})
 
 		// +kubebuilder:scaffold:e2e-webhooks-checks
+	})
 
-		// TODO: Customize the e2e test suite with scenarios specific to your project.
-		// Consider applying sample/CR(s) and check their status and/or verifying
-		// the reconciliation by using the metrics, i.e.:
-		// metricsOutput, err := getMetricsOutput()
-		// Expect(err).NotTo(HaveOccurred(), "Failed to retrieve logs from curl pod")
-		// Expect(metricsOutput).To(ContainSubstring(
-		//    fmt.Sprintf(`controller_runtime_reconcile_total{controller="%s",result="success"} 1`,
-		//    strings.ToLower(<Kind>),
-		// ))
+	// Each It here is fully independent — its own NamespaceClass and its own
+	// Namespace, never shared with another It — specifically so a failure in
+	// one never leaves a wrong precondition for the next. The controller
+	// deployed in BeforeAll above is shared (that's the expensive part), but
+	// nothing about a test's own resources is.
+	Context("NamespaceClass", func() {
+		It("applies a class's resources, resolving {{ .namespace }}", func() {
+			className, nsName, cmName := "e2e-apply-class", "e2e-apply-ns", "e2e-apply-cm"
+			DeferCleanup(func() {
+				deleteTestNamespace(nsName)
+				deleteNamespaceClass(className)
+			})
+
+			applyNamespaceClass(className, cmName)
+			applyLabeledNamespace(nsName, className)
+
+			Eventually(func(g Gomega) {
+				val, err := configMapOwner(nsName, cmName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(val).To(Equal(nsName), "ConfigMap data should resolve {{ .namespace }} to the real namespace")
+			}).Should(Succeed())
+		})
+
+		It("reports the class as Ready once applied", func() {
+			className, nsName, cmName := "e2e-status-class", "e2e-status-ns", "e2e-status-cm"
+			DeferCleanup(func() {
+				deleteTestNamespace(nsName)
+				deleteNamespaceClass(className)
+			})
+
+			applyNamespaceClass(className, cmName)
+			applyLabeledNamespace(nsName, className)
+
+			Eventually(func(g Gomega) {
+				status, err := namespaceClassCondition(className, "Ready")
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(status).To(Equal("True"))
+			}).Should(Succeed())
+		})
+
+		It("corrects drift on a managed resource", func() {
+			className, nsName, cmName := "e2e-drift-class", "e2e-drift-ns", "e2e-drift-cm"
+			DeferCleanup(func() {
+				deleteTestNamespace(nsName)
+				deleteNamespaceClass(className)
+			})
+
+			applyNamespaceClass(className, cmName)
+			applyLabeledNamespace(nsName, className)
+
+			Eventually(func(g Gomega) {
+				val, err := configMapOwner(nsName, cmName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(val).To(Equal(nsName))
+			}).Should(Succeed())
+
+			By("directly patching the ConfigMap's data, simulating an external actor")
+			cmd := exec.Command("kubectl", "patch", "configmap", cmName, "-n", nsName,
+				"--type=merge", "-p", `{"data":{"owner":"someone-else"}}`)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("the watcher noticing and reverting it, with no reconcile triggered by us")
+			Eventually(func(g Gomega) {
+				val, err := configMapOwner(nsName, cmName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(val).To(Equal(nsName))
+			}).Should(Succeed())
+		})
+
+		It("deletes the managed resource when the class label is removed", func() {
+			className, nsName, cmName := "e2e-unlabel-class", "e2e-unlabel-ns", "e2e-unlabel-cm"
+			DeferCleanup(func() {
+				deleteTestNamespace(nsName)
+				deleteNamespaceClass(className)
+			})
+
+			applyNamespaceClass(className, cmName)
+			applyLabeledNamespace(nsName, className)
+
+			Eventually(func(g Gomega) {
+				_, err := configMapOwner(nsName, cmName)
+				g.Expect(err).NotTo(HaveOccurred())
+			}).Should(Succeed())
+
+			By("removing the class label from the Namespace")
+			cmd := exec.Command("kubectl", "label", "ns", nsName, namespaceClassLabel+"-")
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			Eventually(func(g Gomega) {
+				g.Expect(configMapExists(nsName, cmName)).To(BeFalse())
+			}).Should(Succeed())
+		})
+
+		It("recreates the managed resource when the class label is re-added", func() {
+			className, nsName, cmName := "e2e-relabel-class", "e2e-relabel-ns", "e2e-relabel-cm"
+			DeferCleanup(func() {
+				deleteTestNamespace(nsName)
+				deleteNamespaceClass(className)
+			})
+
+			applyNamespaceClass(className, cmName)
+			applyLabeledNamespace(nsName, className)
+			Eventually(func(g Gomega) {
+				g.Expect(configMapExists(nsName, cmName)).To(BeTrue())
+			}).Should(Succeed())
+
+			By("removing the class label")
+			cmd := exec.Command("kubectl", "label", "ns", nsName, namespaceClassLabel+"-")
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(func(g Gomega) {
+				g.Expect(configMapExists(nsName, cmName)).To(BeFalse())
+			}).Should(Succeed())
+
+			By("re-adding the class label")
+			cmd = exec.Command("kubectl", "label", "ns", nsName, fmt.Sprintf("%s=%s", namespaceClassLabel, className))
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			Eventually(func(g Gomega) {
+				g.Expect(configMapExists(nsName, cmName)).To(BeTrue())
+			}).Should(Succeed())
+		})
+
+		It("cascades on class deletion: the resource and the class itself both disappear", func() {
+			className, nsName, cmName := "e2e-cascade-class", "e2e-cascade-ns", "e2e-cascade-cm"
+			DeferCleanup(func() {
+				deleteTestNamespace(nsName)
+				deleteNamespaceClass(className)
+			})
+
+			applyNamespaceClass(className, cmName)
+			applyLabeledNamespace(nsName, className)
+			Eventually(func(g Gomega) {
+				g.Expect(configMapExists(nsName, cmName)).To(BeTrue())
+			}).Should(Succeed())
+
+			By("deleting the NamespaceClass")
+			deleteNamespaceClass(className)
+
+			By("the managed ConfigMap being cleaned up")
+			Eventually(func(g Gomega) {
+				g.Expect(configMapExists(nsName, cmName)).To(BeFalse())
+			}).Should(Succeed())
+
+			By("the finalizer eventually clearing, so the NamespaceClass itself is actually gone")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "namespaceclass", className)
+				_, err := utils.Run(cmd)
+				g.Expect(err).To(HaveOccurred(), "NamespaceClass should no longer exist")
+			}).Should(Succeed())
+		})
 	})
 })
 
@@ -327,6 +479,87 @@ func serviceAccountToken() (string, error) {
 func getMetricsOutput() (string, error) {
 	By("getting the curl-metrics logs")
 	cmd := exec.Command("kubectl", "logs", "curl-metrics", "-n", namespace)
+	return utils.Run(cmd)
+}
+
+// applyNamespaceClass creates a NamespaceClass named className whose single
+// managed resource is a ConfigMap named cmName, with a data field templated
+// on {{ .namespace }} — so callers can check both that the resource got
+// applied at all and that templating actually resolved.
+func applyNamespaceClass(className, cmName string) {
+	manifest := fmt.Sprintf(`
+apiVersion: namespaceclass.akuity.io/v1alpha1
+kind: NamespaceClass
+metadata:
+  name: %s
+spec:
+  resources:
+    - apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: %s
+      data:
+        owner: "{{ .namespace }}"
+`, className, cmName)
+
+	cmd := exec.Command("kubectl", "apply", "-f", "-")
+	cmd.Stdin = strings.NewReader(manifest)
+	_, err := utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), "Failed to apply NamespaceClass %s", className)
+}
+
+// applyLabeledNamespace creates a Namespace named nsName labeled to
+// reference className.
+func applyLabeledNamespace(nsName, className string) {
+	manifest := fmt.Sprintf(`
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: %s
+  labels:
+    %s: %s
+`, nsName, namespaceClassLabel, className)
+
+	cmd := exec.Command("kubectl", "apply", "-f", "-")
+	cmd.Stdin = strings.NewReader(manifest)
+	_, err := utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), "Failed to apply Namespace %s", nsName)
+}
+
+// deleteNamespaceClass deletes a NamespaceClass, tolerating one that's
+// already gone — used both mid-test and in DeferCleanup, where the class may
+// or may not still exist depending on how far the test got.
+func deleteNamespaceClass(className string) {
+	cmd := exec.Command("kubectl", "delete", "namespaceclass", className, "--ignore-not-found", "--wait=false")
+	_, _ = utils.Run(cmd)
+}
+
+// deleteTestNamespace deletes one of these tests' own Namespaces, tolerating
+// one that's already gone.
+func deleteTestNamespace(nsName string) {
+	cmd := exec.Command("kubectl", "delete", "ns", nsName, "--ignore-not-found", "--wait=false")
+	_, _ = utils.Run(cmd)
+}
+
+// configMapOwner returns the value of data.owner on the named ConfigMap.
+func configMapOwner(nsName, cmName string) (string, error) {
+	cmd := exec.Command("kubectl", "get", "configmap", cmName, "-n", nsName,
+		"-o", "jsonpath={.data.owner}")
+	return utils.Run(cmd)
+}
+
+// configMapExists reports whether the named ConfigMap currently exists.
+func configMapExists(nsName, cmName string) bool {
+	cmd := exec.Command("kubectl", "get", "configmap", cmName, "-n", nsName)
+	_, err := utils.Run(cmd)
+	return err == nil
+}
+
+// namespaceClassCondition returns the Status of the named condition type on
+// a NamespaceClass's status.conditions.
+func namespaceClassCondition(className, conditionType string) (string, error) {
+	cmd := exec.Command("kubectl", "get", "namespaceclass", className,
+		"-o", fmt.Sprintf(`jsonpath={.status.conditions[?(@.type=="%s")].status}`, conditionType))
 	return utils.Run(cmd)
 }
 
