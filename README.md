@@ -4,6 +4,36 @@
 ## Description
 // TODO(user): An in-depth paragraph about your project and overview of use
 
+## Drift Correction
+
+Resources are reconciled with Kubernetes [Server-Side Apply](https://kubernetes.io/docs/reference/using-api/server-side-apply/)
+(`client.Apply` with `ForceOwnership`, this controller as the field manager).
+That means drift correction is scoped to the fields a `NamespaceClass`
+actually templates: if a `ConfigMap` key or label the class defines gets
+hand-edited, the next reconcile reverts it. Fields the class never
+mentioned — an extra label, an extra `data` key someone else added — are
+left alone, because this controller never claimed ownership of them in the
+first place.
+
+This is a deliberate choice, not a gap: it's the same field-manager model
+Kubernetes itself uses so multiple writers (an HPA and a Deployment
+controller both touching one Deployment, a mutating webhook injecting
+compliance labels, an auto-populated `ServiceAccount` field) can coexist on
+one object without fighting over fields they don't own. A `NamespaceClass`
+resource is expected to share space with other legitimate cluster tooling
+under this model, rather than assume it's the object's only writer.
+
+**Future work:** some use cases (e.g. a security baseline that must never
+drift, even by an added field) want the opposite guarantee — full,
+exclusive ownership, where any change or addition not in the template gets
+stripped. That would mean a `Get` + full-object `Update` instead of a
+`Patch`/Apply, and is a real, valid alternative for those cases — but it
+also means the controller will fight any other legitimate writer touching
+the same resource. A natural extension would be a per-`NamespaceClass` field
+(e.g. `spec.strict: true`) letting the class author pick coexistence
+(default) vs. exclusive ownership per class, rather than picking one
+behavior globally. Not implemented here.
+
 ## Quick Install
 
 The controller image and Helm chart are published to GHCR on every tagged
