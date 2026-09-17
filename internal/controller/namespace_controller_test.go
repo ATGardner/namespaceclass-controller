@@ -30,6 +30,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	namespaceclassv1alpha1 "github.com/atgardner/namespaceclass-controller/api/v1alpha1"
+	"github.com/atgardner/namespaceclass-controller/internal/common"
+	"github.com/atgardner/namespaceclass-controller/internal/manager"
 )
 
 var _ = Describe("Namespace Controller", func() {
@@ -55,13 +57,13 @@ data:
 		ns := &corev1.Namespace{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:   "diff-ns",
-				Labels: map[string]string{namespaceClassLabel: class.Name},
+				Labels: map[string]string{common.NamespaceClassLabel: class.Name},
 			},
 		}
 		Expect(k8sClient.Create(ctx, ns)).To(Succeed())
 		DeferCleanup(func() { forceDeleteNamespace(ctx, ns) })
 
-		reconciler := &NamespaceReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+		reconciler := &NamespaceReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), manager: manager.NoOp()}
 		req := reconcile.Request{NamespacedName: types.NamespacedName{Name: ns.Name}}
 
 		By("reconciling once so cm-a exists")
@@ -113,13 +115,13 @@ data:
 		ns := &corev1.Namespace{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:   "unlabel-ns",
-				Labels: map[string]string{namespaceClassLabel: class.Name},
+				Labels: map[string]string{common.NamespaceClassLabel: class.Name},
 			},
 		}
 		Expect(k8sClient.Create(ctx, ns)).To(Succeed())
 		DeferCleanup(func() { forceDeleteNamespace(ctx, ns) })
 
-		reconciler := &NamespaceReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+		reconciler := &NamespaceReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), manager: manager.NoOp()}
 		req := reconcile.Request{NamespacedName: types.NamespacedName{Name: ns.Name}}
 
 		_, err := reconciler.Reconcile(ctx, req)
@@ -130,7 +132,7 @@ data:
 
 		By("removing the class label")
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: ns.Name}, ns)).To(Succeed())
-		delete(ns.Labels, namespaceClassLabel)
+		delete(ns.Labels, common.NamespaceClassLabel)
 		Expect(k8sClient.Update(ctx, ns)).To(Succeed())
 
 		_, err = reconciler.Reconcile(ctx, req)
@@ -181,13 +183,13 @@ data:
 		ns := &corev1.Namespace{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:   "switch-ns",
-				Labels: map[string]string{namespaceClassLabel: classA.Name},
+				Labels: map[string]string{common.NamespaceClassLabel: classA.Name},
 			},
 		}
 		Expect(k8sClient.Create(ctx, ns)).To(Succeed())
 		DeferCleanup(func() { forceDeleteNamespace(ctx, ns) })
 
-		reconciler := &NamespaceReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+		reconciler := &NamespaceReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), manager: manager.NoOp()}
 		req := reconcile.Request{NamespacedName: types.NamespacedName{Name: ns.Name}}
 
 		_, err := reconciler.Reconcile(ctx, req)
@@ -198,7 +200,7 @@ data:
 
 		By("switching the namespace from class A to class B")
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: ns.Name}, ns)).To(Succeed())
-		ns.Labels[namespaceClassLabel] = classB.Name
+		ns.Labels[common.NamespaceClassLabel] = classB.Name
 		Expect(k8sClient.Update(ctx, ns)).To(Succeed())
 
 		_, err = reconciler.Reconcile(ctx, req)
@@ -242,13 +244,13 @@ data:
 		ns := &corev1.Namespace{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:   "terminating-ns",
-				Labels: map[string]string{namespaceClassLabel: class.Name},
+				Labels: map[string]string{common.NamespaceClassLabel: class.Name},
 			},
 		}
 		Expect(k8sClient.Create(ctx, ns)).To(Succeed())
 		DeferCleanup(func() { forceDeleteNamespace(ctx, ns) })
 
-		reconciler := &NamespaceReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+		reconciler := &NamespaceReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), manager: manager.NoOp()}
 		req := reconcile.Request{NamespacedName: types.NamespacedName{Name: ns.Name}}
 
 		_, err := reconciler.Reconcile(ctx, req)
@@ -292,13 +294,13 @@ data:
 		ns := &corev1.Namespace{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:   "vanished-ns",
-				Labels: map[string]string{namespaceClassLabel: class.Name},
+				Labels: map[string]string{common.NamespaceClassLabel: class.Name},
 			},
 		}
 		Expect(k8sClient.Create(ctx, ns)).To(Succeed())
 		DeferCleanup(func() { forceDeleteNamespace(ctx, ns) })
 
-		reconciler := &NamespaceReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+		reconciler := &NamespaceReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), manager: manager.NoOp()}
 		req := reconcile.Request{NamespacedName: types.NamespacedName{Name: ns.Name}}
 
 		_, err := reconciler.Reconcile(ctx, req)
@@ -338,20 +340,20 @@ metadata:
 		ns := &corev1.Namespace{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:   "failing-apply-ns",
-				Labels: map[string]string{namespaceClassLabel: class.Name},
+				Labels: map[string]string{common.NamespaceClassLabel: class.Name},
 			},
 		}
 		Expect(k8sClient.Create(ctx, ns)).To(Succeed())
 		DeferCleanup(func() { forceDeleteNamespace(ctx, ns) })
 
-		reconciler := &NamespaceReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+		reconciler := &NamespaceReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), manager: manager.NoOp()}
 		req := reconcile.Request{NamespacedName: types.NamespacedName{Name: ns.Name}}
 
 		_, err := reconciler.Reconcile(ctx, req)
 		Expect(err).To(HaveOccurred())
 
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: ns.Name}, ns)).To(Succeed())
-		Expect(ns.Annotations[reconcileErrorAnnotation]).NotTo(BeEmpty())
+		Expect(ns.Annotations[common.ReconcileErrorAnnotation]).NotTo(BeEmpty())
 
 		By("fixing the class to something appliable")
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: class.Name}, class)).To(Succeed())
@@ -369,7 +371,7 @@ data:
 		Expect(err).NotTo(HaveOccurred())
 
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: ns.Name}, ns)).To(Succeed())
-		Expect(ns.Annotations[reconcileErrorAnnotation]).To(BeEmpty())
+		Expect(ns.Annotations[common.ReconcileErrorAnnotation]).To(BeEmpty())
 	})
 
 	It("resolves {{ .namespace }} in an applied resource's data", func() {
@@ -392,13 +394,13 @@ data:
 		ns := &corev1.Namespace{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:   "templated-ns",
-				Labels: map[string]string{namespaceClassLabel: class.Name},
+				Labels: map[string]string{common.NamespaceClassLabel: class.Name},
 			},
 		}
 		Expect(k8sClient.Create(ctx, ns)).To(Succeed())
 		DeferCleanup(func() { forceDeleteNamespace(ctx, ns) })
 
-		reconciler := &NamespaceReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+		reconciler := &NamespaceReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), manager: manager.NoOp()}
 		req := reconcile.Request{NamespacedName: types.NamespacedName{Name: ns.Name}}
 
 		_, err := reconciler.Reconcile(ctx, req)

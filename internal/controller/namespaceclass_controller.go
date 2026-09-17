@@ -33,9 +33,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	namespaceclassv1alpha1 "github.com/atgardner/namespaceclass-controller/api/v1alpha1"
+	"github.com/atgardner/namespaceclass-controller/internal/common"
 )
-
-const namespaceClassFinalizer = "namespaceclass.akuity.io/finalizer"
 
 // NamespaceClassReconciler reconciles a NamespaceClass object
 type NamespaceClassReconciler struct {
@@ -56,7 +55,7 @@ func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 
 	if nsClass.DeletionTimestamp.IsZero() {
-		if controllerutil.AddFinalizer(nsClass, namespaceClassFinalizer) {
+		if controllerutil.AddFinalizer(nsClass, common.NamespaceClassFinalizer) {
 			return ctrl.Result{}, r.Update(ctx, nsClass)
 		}
 	} else {
@@ -64,14 +63,14 @@ func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 
 	var nsList corev1.NamespaceList
-	if err := r.List(ctx, &nsList, client.MatchingLabels{namespaceClassLabel: nsClass.Name}); err != nil {
+	if err := r.List(ctx, &nsList, client.MatchingLabels{common.NamespaceClassLabel: nsClass.Name}); err != nil {
 		log.Error(err, "Failed to list referencing Namespaces")
 		return ctrl.Result{}, err
 	}
 
 	failing := 0
 	for _, ns := range nsList.Items {
-		if ns.GetAnnotations()[reconcileErrorAnnotation] != "" {
+		if ns.GetAnnotations()[common.ReconcileErrorAnnotation] != "" {
 			failing++
 		}
 	}
@@ -107,12 +106,12 @@ func (r *NamespaceClassReconciler) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 func (r *NamespaceClassReconciler) reconcileDelete(ctx context.Context, nsClass *namespaceclassv1alpha1.NamespaceClass) (ctrl.Result, error) {
-	if !controllerutil.ContainsFinalizer(nsClass, namespaceClassFinalizer) {
+	if !controllerutil.ContainsFinalizer(nsClass, common.NamespaceClassFinalizer) {
 		return ctrl.Result{}, nil
 	}
 
 	var nsList corev1.NamespaceList
-	if err := r.List(ctx, &nsList, client.MatchingLabels{namespaceClassLabel: nsClass.Name}); err != nil {
+	if err := r.List(ctx, &nsList, client.MatchingLabels{common.NamespaceClassLabel: nsClass.Name}); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -125,7 +124,7 @@ func (r *NamespaceClassReconciler) reconcileDelete(ctx context.Context, nsClass 
 		}
 	}
 
-	controllerutil.RemoveFinalizer(nsClass, namespaceClassFinalizer)
+	controllerutil.RemoveFinalizer(nsClass, common.NamespaceClassFinalizer)
 	return ctrl.Result{}, r.Update(ctx, nsClass)
 }
 
@@ -156,7 +155,7 @@ func readyMessage(failing, total int) string {
 }
 
 func mapNamespaceToClass(ctx context.Context, obj client.Object) []reconcile.Request {
-	className, ok := obj.GetLabels()[namespaceClassLabel]
+	className, ok := obj.GetLabels()[common.NamespaceClassLabel]
 	if !ok {
 		return nil
 	}

@@ -29,6 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	namespaceclassv1alpha1 "github.com/atgardner/namespaceclass-controller/api/v1alpha1"
+	"github.com/atgardner/namespaceclass-controller/internal/common"
 )
 
 var _ = Describe("NamespaceClass Controller", func() {
@@ -110,8 +111,8 @@ var _ = Describe("NamespaceClass Controller", func() {
 				failingNs = &corev1.Namespace{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:        "failing-ns",
-						Labels:      map[string]string{namespaceClassLabel: resourceName},
-						Annotations: map[string]string{reconcileErrorAnnotation: "boom"},
+						Labels:      map[string]string{common.NamespaceClassLabel: resourceName},
+						Annotations: map[string]string{common.ReconcileErrorAnnotation: "boom"},
 					},
 				}
 				Expect(k8sClient.Create(ctx, failingNs)).To(Succeed())
@@ -119,7 +120,7 @@ var _ = Describe("NamespaceClass Controller", func() {
 				healthyNs = &corev1.Namespace{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:   "healthy-ns",
-						Labels: map[string]string{namespaceClassLabel: resourceName},
+						Labels: map[string]string{common.NamespaceClassLabel: resourceName},
 					},
 				}
 				Expect(k8sClient.Create(ctx, healthyNs)).To(Succeed())
@@ -160,8 +161,8 @@ var _ = Describe("NamespaceClass Controller", func() {
 				otherNs = &corev1.Namespace{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:        "other-class-ns",
-						Labels:      map[string]string{namespaceClassLabel: "some-other-class"},
-						Annotations: map[string]string{reconcileErrorAnnotation: "boom"},
+						Labels:      map[string]string{common.NamespaceClassLabel: "some-other-class"},
+						Annotations: map[string]string{common.ReconcileErrorAnnotation: "boom"},
 					},
 				}
 				Expect(k8sClient.Create(ctx, otherNs)).To(Succeed())
@@ -199,8 +200,8 @@ var _ = Describe("NamespaceClass Controller", func() {
 				badNs = &corev1.Namespace{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:        "bad-annotation-ns",
-						Labels:      map[string]string{namespaceClassLabel: resourceName},
-						Annotations: map[string]string{appliedResourcesAnnotation: "not valid json"},
+						Labels:      map[string]string{common.NamespaceClassLabel: resourceName},
+						Annotations: map[string]string{common.AppliedResourcesAnnotation: "not valid json"},
 					},
 				}
 				Expect(k8sClient.Create(ctx, badNs)).To(Succeed())
@@ -229,7 +230,7 @@ var _ = Describe("NamespaceClass Controller", func() {
 				Expect(err).NotTo(HaveOccurred())
 
 				Expect(k8sClient.Get(ctx, typeNamespacedName, resource)).To(Succeed())
-				Expect(resource.Finalizers).To(ContainElement(namespaceClassFinalizer))
+				Expect(resource.Finalizers).To(ContainElement(common.NamespaceClassFinalizer))
 			})
 		})
 
@@ -240,9 +241,9 @@ var _ = Describe("NamespaceClass Controller", func() {
 				blockedNs = &corev1.Namespace{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:   "blocked-ns",
-						Labels: map[string]string{namespaceClassLabel: resourceName},
+						Labels: map[string]string{common.NamespaceClassLabel: resourceName},
 						Annotations: map[string]string{
-							appliedResourcesAnnotation: `[{"version":"v1","kind":"ConfigMap","name":"my-cm"}]`,
+							common.AppliedResourcesAnnotation: `[{"version":"v1","kind":"ConfigMap","name":"my-cm"}]`,
 						},
 					},
 				}
@@ -272,11 +273,11 @@ var _ = Describe("NamespaceClass Controller", func() {
 				Expect(err).NotTo(HaveOccurred())
 
 				Expect(k8sClient.Get(ctx, typeNamespacedName, resource)).To(Succeed())
-				Expect(resource.Finalizers).To(ContainElement(namespaceClassFinalizer))
+				Expect(resource.Finalizers).To(ContainElement(common.NamespaceClassFinalizer))
 
 				By("the Namespace finishing convergence")
 				Expect(k8sClient.Get(ctx, types.NamespacedName{Name: blockedNs.Name}, blockedNs)).To(Succeed())
-				delete(blockedNs.Annotations, appliedResourcesAnnotation)
+				delete(blockedNs.Annotations, common.AppliedResourcesAnnotation)
 				Expect(k8sClient.Update(ctx, blockedNs)).To(Succeed())
 
 				_, err = controllerReconciler.Reconcile(ctx, req)

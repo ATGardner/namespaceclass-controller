@@ -33,6 +33,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	namespaceclassv1alpha1 "github.com/atgardner/namespaceclass-controller/api/v1alpha1"
+	"github.com/atgardner/namespaceclass-controller/internal/common"
 )
 
 // This suite runs a real Manager, scoped to just this Describe block's own
@@ -105,7 +106,7 @@ data:
 		ns := &corev1.Namespace{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:   nsName,
-				Labels: map[string]string{namespaceClassLabel: className},
+				Labels: map[string]string{common.NamespaceClassLabel: className},
 			},
 		}
 		Expect(k8sClient.Create(ctx, ns)).To(Succeed())
