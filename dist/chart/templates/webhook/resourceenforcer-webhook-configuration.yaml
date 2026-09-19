@@ -1,0 +1,34 @@
+{{- if .Values.webhook.enabled }}
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  annotations:
+    {{- if .Values.certManager.enabled }}
+    cert-manager.io/inject-ca-from: {{ .Release.Namespace }}/{{ include "namespaceclass-controller.resourceName" (dict "suffix" "serving-cert" "context" $) }}
+    {{- end }}
+  name: {{ include "namespaceclass-controller.resourceName" (dict "suffix" "resourceenforcer-webhook-configuration" "context" $) }}
+webhooks:
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: {{ include "namespaceclass-controller.resourceName" (dict "suffix" "webhook-service" "context" $) }}
+      namespace: {{ .Release.Namespace }}
+      path: /mutate-namespaceclass-managed-resources
+  failurePolicy: Ignore
+  name: menforcer.namespaceclass.akuity.io
+  objectSelector:
+    matchExpressions:
+    - key: namespaceclass.akuity.io/parent
+      operator: Exists
+  rules:
+  - apiGroups:
+    - '*'
+    apiVersions:
+    - '*'
+    operations:
+    - UPDATE
+    resources:
+    - '*/*'
+  sideEffects: None
+{{- end }}

@@ -39,6 +39,7 @@ import (
 
 	namespaceclassv1alpha1 "github.com/atgardner/namespaceclass-controller/api/v1alpha1"
 	"github.com/atgardner/namespaceclass-controller/internal/controller"
+	"github.com/atgardner/namespaceclass-controller/internal/webhook/enforcer"
 	webhookv1alpha1 "github.com/atgardner/namespaceclass-controller/internal/webhook/v1alpha1"
 	// +kubebuilder:scaffold:imports
 )
@@ -208,6 +209,8 @@ func main() {
 			setupLog.Error(err, "Failed to create webhook", "webhook", "NamespaceClass")
 			os.Exit(1)
 		}
+
+		enforcer.SetupResourceEnforcerWebhookWithManager(mgr)
 	}
 	// +kubebuilder:scaffold:builder
 

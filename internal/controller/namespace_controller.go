@@ -98,7 +98,7 @@ func (r *NamespaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}()
 
 	var desired []appliedResource
-	rb := common.NewResourceBuilder(r.RESTMapper(), r.Scheme)
+	rb := common.NewResourceBuilder(r.Client)
 	if nsClass != nil && nsClass.DeletionTimestamp.IsZero() {
 		var errs field.ErrorList
 

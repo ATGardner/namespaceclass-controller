@@ -8,6 +8,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/yaml"
 
@@ -50,10 +51,10 @@ type (
 	}
 )
 
-func NewResourceBuilder(rm meta.RESTMapper, scheme *runtime.Scheme) ResourceBuilder {
+func NewResourceBuilder(clnt client.Client) ResourceBuilder {
 	return &resourceBuilder{
-		rm:     rm,
-		scheme: scheme,
+		rm:     clnt.RESTMapper(),
+		scheme: clnt.Scheme(),
 	}
 }
 
