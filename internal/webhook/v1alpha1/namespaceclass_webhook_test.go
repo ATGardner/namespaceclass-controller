@@ -20,51 +20,114 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"sigs.k8s.io/yaml"
+
 	namespaceclassv1alpha1 "github.com/atgardner/namespaceclass-controller/api/v1alpha1"
-	// TODO (user): Add any additional imports if needed
 )
 
 var _ = Describe("NamespaceClass Webhook", func() {
-	var (
-		obj       *namespaceclassv1alpha1.NamespaceClass
-		oldObj    *namespaceclassv1alpha1.NamespaceClass
-		validator NamespaceClassValidator
-	)
+	var validator *NamespaceClassValidator
 
 	BeforeEach(func() {
-		obj = &namespaceclassv1alpha1.NamespaceClass{}
-		oldObj = &namespaceclassv1alpha1.NamespaceClass{}
-		validator = NamespaceClassValidator{}
-		Expect(validator).NotTo(BeNil(), "Expected validator to be initialized")
-		Expect(oldObj).NotTo(BeNil(), "Expected oldObj to be initialized")
-		Expect(obj).NotTo(BeNil(), "Expected obj to be initialized")
+		// Wired against the suite's real client (backed by envtest's live
+		// control plane), so RESTMapper() reflects real discovery: ConfigMap
+		// is namespaced, ClusterRole is cluster-scoped, and a made-up kind is
+		// genuinely unresolvable. Nothing here is persisted to the cluster -
+		// ValidateCreate/ValidateUpdate are called directly, not through
+		// k8sClient.Create - so there's no cleanup to do between tests.
+		validator = &NamespaceClassValidator{Client: k8sClient}
 	})
 
-	AfterEach(func() {
-		// TODO (user): Add any teardown logic common to all tests
-	})
+	Context("When creating or updating a NamespaceClass", func() {
+		It("admits a class whose resources are all namespaced", func() {
+			obj := newTestNamespaceClass(toUnstructured(`
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: valid-cm
+`))
 
-	Context("When creating or updating NamespaceClass under Validating Webhook", func() {
-		// TODO (user): Add logic for validating webhooks
-		// Example:
-		// It("Should deny creation if a required field is missing", func() {
-		//     By("simulating an invalid creation scenario")
-		//     obj.SomeRequiredField = ""
-		//     Expect(validator.ValidateCreate(ctx, obj)).Error().To(HaveOccurred())
-		// })
-		//
-		// It("Should admit creation if all required fields are present", func() {
-		//     By("simulating an invalid creation scenario")
-		//     obj.SomeRequiredField = "valid_value"
-		//     Expect(validator.ValidateCreate(ctx, obj)).To(BeNil())
-		// })
-		//
-		// It("Should validate updates correctly", func() {
-		//     By("simulating a valid update scenario")
-		//     oldObj.SomeRequiredField = "updated_value"
-		//     obj.SomeRequiredField = "updated_value"
-		//     Expect(validator.ValidateUpdate(ctx, oldObj, obj)).To(BeNil())
-		// })
-	})
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).NotTo(HaveOccurred())
+		})
 
+		It("rejects a cluster-scoped resource", func() {
+			obj := newTestNamespaceClass(toUnstructured(`
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cr
+rules: []
+`))
+
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("not namespaced"))
+		})
+
+		It("rejects an unresolvable kind", func() {
+			obj := newTestNamespaceClass(toUnstructured(`
+apiVersion: bogus.example.com/v1
+kind: TotallyFake
+metadata:
+  name: fake
+`))
+
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).To(HaveOccurred())
+		})
+
+		It("aggregates errors from every bad resource, not just the first", func() {
+			obj := newTestNamespaceClass(
+				toUnstructured(`
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: multi-cr
+rules: []
+`),
+				toUnstructured(`
+apiVersion: bogus.example.com/v1
+kind: TotallyFake
+metadata:
+  name: multi-fake
+`),
+			)
+
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("ClusterRole"))
+			Expect(err.Error()).To(ContainSubstring("TotallyFake"))
+		})
+
+		It("validates updates the same way as creates", func() {
+			oldObj := newTestNamespaceClass()
+			newObj := newTestNamespaceClass(toUnstructured(`
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: update-cr
+rules: []
+`))
+
+			_, err := validator.ValidateUpdate(ctx, oldObj, newObj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("not namespaced"))
+		})
+	})
 })
+
+func newTestNamespaceClass(resources ...unstructured.Unstructured) *namespaceclassv1alpha1.NamespaceClass {
+	return &namespaceclassv1alpha1.NamespaceClass{
+		ObjectMeta: metav1.ObjectMeta{Name: "webhook-test-class"},
+		Spec:       namespaceclassv1alpha1.NamespaceClassSpec{Resources: resources},
+	}
+}
+
+func toUnstructured(data string) unstructured.Unstructured {
+	var res unstructured.Unstructured
+	Expect(yaml.Unmarshal([]byte(data), &res)).To(Succeed())
+	return res
+}
