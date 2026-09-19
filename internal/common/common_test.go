@@ -14,11 +14,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package controller
+package common
 
 import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"sigs.k8s.io/yaml"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
@@ -122,3 +123,9 @@ data:
 		Expect(err).To(HaveOccurred())
 	})
 })
+
+func toUnstructured(data string) unstructured.Unstructured {
+	var res unstructured.Unstructured
+	Expect(yaml.Unmarshal([]byte(data), &res)).To(Succeed())
+	return res
+}
