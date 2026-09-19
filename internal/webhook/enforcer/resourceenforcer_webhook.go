@@ -7,7 +7,6 @@ import (
 	"github.com/atgardner/namespaceclass-controller/internal/common"
 	jsonpatch "github.com/evanphx/json-patch/v5"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -73,12 +72,11 @@ func (r *ResourceEnforcer) Handle(ctx context.Context, req admission.Request) ad
 }
 
 func (r *ResourceEnforcer) getDesiredResource(ctx context.Context, req admission.Request) (*unstructured.Unstructured, error) {
-	content, err := runtime.DefaultUnstructuredConverter.ToUnstructured(req.Object.Object)
-	if err != nil {
-		return nil, fmt.Errorf("failed to convert object to unstructured: %w", err)
+	obj := &unstructured.Unstructured{}
+	if err := r.decoder.Decode(req, obj); err != nil {
+		return nil, fmt.Errorf("failed to decode admission request object: %w", err)
 	}
 
-	obj := &unstructured.Unstructured{Object: content}
 	nsClassName := obj.GetLabels()[common.ParentClassLabel]
 	if nsClassName == "" {
 		return nil, nil
