@@ -405,6 +405,23 @@ spec:
     app.kubernetes.io/name: namespaceclass-controller
     control-plane: controller-manager
 ---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: namespaceclass-controller
+  name: namespaceclass-controller-webhook-service
+  namespace: namespaceclass-controller-system
+spec:
+  ports:
+  - port: 443
+    protocol: TCP
+    targetPort: 9443
+  selector:
+    app.kubernetes.io/name: namespaceclass-controller
+    control-plane: controller-manager
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -433,6 +450,8 @@ spec:
         - --metrics-bind-address=:8443
         - --leader-elect
         - --health-probe-bind-address=:8081
+        - --webhook-cert-path=/tmp/k8s-webhook-server/serving-certs
+        - --webhook-port=9443
         command:
         - /manager
         image: controller:latest
@@ -446,6 +465,9 @@ spec:
         ports:
         - containerPort: 8081
           name: health
+          protocol: TCP
+        - containerPort: 9443
+          name: webhook-server
           protocol: TCP
         readinessProbe:
           httpGet:
@@ -466,11 +488,90 @@ spec:
             drop:
             - ALL
           readOnlyRootFilesystem: true
-        volumeMounts: []
+        volumeMounts:
+        - mountPath: /tmp/k8s-webhook-server/serving-certs
+          name: webhook-certs
+          readOnly: true
       securityContext:
         runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
       serviceAccountName: namespaceclass-controller-controller-manager
       terminationGracePeriodSeconds: 10
-      volumes: []
+      volumes:
+      - name: webhook-certs
+        secret:
+          secretName: webhook-server-cert
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: namespaceclass-controller
+  name: namespaceclass-controller-metrics-certs
+  namespace: namespaceclass-controller-system
+spec:
+  dnsNames:
+  - SERVICE_NAME.SERVICE_NAMESPACE.svc
+  - SERVICE_NAME.SERVICE_NAMESPACE.svc.cluster.local
+  issuerRef:
+    kind: Issuer
+    name: namespaceclass-controller-selfsigned-issuer
+  secretName: metrics-server-cert
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: namespaceclass-controller
+  name: namespaceclass-controller-serving-cert
+  namespace: namespaceclass-controller-system
+spec:
+  dnsNames:
+  - namespaceclass-controller-webhook-service.namespaceclass-controller-system.svc
+  - namespaceclass-controller-webhook-service.namespaceclass-controller-system.svc.cluster.local
+  issuerRef:
+    kind: Issuer
+    name: namespaceclass-controller-selfsigned-issuer
+  secretName: webhook-server-cert
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: namespaceclass-controller
+  name: namespaceclass-controller-selfsigned-issuer
+  namespace: namespaceclass-controller-system
+spec:
+  selfSigned: {}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  annotations:
+    cert-manager.io/inject-ca-from: namespaceclass-controller-system/namespaceclass-controller-serving-cert
+  name: namespaceclass-controller-validating-webhook-configuration
+webhooks:
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: namespaceclass-controller-webhook-service
+      namespace: namespaceclass-controller-system
+      path: /validate-namespaceclass-akuity-io-v1alpha1-namespaceclass
+  failurePolicy: Fail
+  name: vnamespaceclass-v1alpha1.kb.io
+  rules:
+  - apiGroups:
+    - namespaceclass.akuity.io
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - namespaceclasses
+  sideEffects: None

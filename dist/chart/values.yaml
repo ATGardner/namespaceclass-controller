@@ -170,12 +170,12 @@ metrics:
 ## Required for webhook certificates and metrics endpoint certificates.
 ##
 certManager:
-  enabled: false
+  enabled: true
 
 ## Webhook server configuration
 ##
 webhook:
-  enabled: false
+  enabled: true
   # Webhook server port
   port: 9443
 
