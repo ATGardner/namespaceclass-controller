@@ -97,7 +97,7 @@ func init() {
 func (n *NamespaceClass) GetGvks() sets.Set[schema.GroupVersionKind] {
 	set := sets.New[schema.GroupVersionKind]()
 	for _, res := range n.Spec.Resources {
-		set.Insert(res.GetObjectKind().GroupVersionKind())
+		set.Insert(res.GroupVersionKind())
 	}
 
 	return set

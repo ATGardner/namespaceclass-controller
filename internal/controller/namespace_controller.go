@@ -30,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -102,15 +103,30 @@ func (r *NamespaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	var desired []appliedResource
 	if nsClass != nil && nsClass.DeletionTimestamp.IsZero() {
-		desired = make([]appliedResource, len(nsClass.Spec.Resources))
-		for i := range nsClass.Spec.Resources {
-			orig := nsClass.Spec.Resources[i]
-			res, err := r.getFinalResource(&orig, namespace.Name, nsClass)
+		var errs field.ErrorList
+
+		resolved := make([]*unstructured.Unstructured, len(nsClass.Spec.Resources))
+		for i, orig := range nsClass.Spec.Resources {
+			res, err := r.getFinalResource(&orig, namespace.Name, nsClass) // scope check lives inside this
 			if err != nil {
 				log.Error(err, "Failed to get final resource to apply", "kind", orig.GroupVersionKind().Kind, "name", orig.GetName())
-				return ctrl.Result{}, fmt.Errorf("failed to get final resource %s/%s: %w", orig.GroupVersionKind().Kind, orig.GetName(), err)
+				errs = append(errs, field.Invalid(
+					field.NewPath("spec").Child("resources").Index(i),
+					orig.GroupVersionKind().String(),
+					err.Error(),
+				))
+				continue
 			}
 
+			resolved[i] = res
+		}
+
+		if len(errs) > 0 {
+			return ctrl.Result{}, fmt.Errorf("failed to resolve NamespaceClass resources: %w", errs.ToAggregate())
+		}
+
+		desired = make([]appliedResource, len(resolved))
+		for i, res := range resolved {
 			//nolint:staticcheck // client.Apply is deprecated in favor of client.Client.Apply(), which requires typed apply configurations we don't have for arbitrary unstructured resources
 			if err := r.Patch(ctx, res, client.Apply, client.ForceOwnership, client.FieldOwner(common.FieldOwner)); err != nil {
 				log.Error(err, "Failed to apply resource", "kind", res.GroupVersionKind().Kind, "name", res.GetName())
@@ -239,6 +255,11 @@ func (r *NamespaceReconciler) getNamespaceClass(ctx context.Context, ns *corev1.
 }
 
 func (r *NamespaceReconciler) getFinalResource(u *unstructured.Unstructured, namespace string, nsClass *namespaceclassv1alpha1.NamespaceClass) (*unstructured.Unstructured, error) {
+	err := common.CheckNamespaceScoped(r.RESTMapper(), u)
+	if err != nil {
+		return nil, err
+	}
+
 	res, err := templateResourceNamespace(u, namespace)
 	if err != nil {
 		return nil, err

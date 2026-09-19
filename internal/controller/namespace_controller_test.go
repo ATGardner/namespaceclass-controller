@@ -23,6 +23,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -409,5 +410,105 @@ data:
 		var cm corev1.ConfigMap
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns.Name, Name: "templated-cm"}, &cm)).To(Succeed())
 		Expect(cm.Data["owner"]).To(Equal(ns.Name))
+	})
+
+	It("rejects a cluster-scoped resource and never applies it", func() {
+		class := &namespaceclassv1alpha1.NamespaceClass{
+			ObjectMeta: metav1.ObjectMeta{Name: "cluster-scoped-class"},
+			Spec: namespaceclassv1alpha1.NamespaceClassSpec{
+				// ClusterRole is cluster-scoped; the resolve step must reject it
+				// before it ever reaches Patch.
+				Resources: []unstructured.Unstructured{toUnstructured(`
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cluster-scoped-cr
+rules: []
+`)},
+			},
+		}
+		Expect(k8sClient.Create(ctx, class)).To(Succeed())
+		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, class)).To(Succeed()) })
+
+		ns := &corev1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   "cluster-scoped-ns",
+				Labels: map[string]string{common.NamespaceClassLabel: class.Name},
+			},
+		}
+		Expect(k8sClient.Create(ctx, ns)).To(Succeed())
+		DeferCleanup(func() { forceDeleteNamespace(ctx, ns) })
+
+		reconciler := &NamespaceReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), manager: manager.NoOp()}
+		req := reconcile.Request{NamespacedName: types.NamespacedName{Name: ns.Name}}
+
+		_, err := reconciler.Reconcile(ctx, req)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("not namespaced"))
+
+		var cr rbacv1.ClusterRole
+		err = k8sClient.Get(ctx, types.NamespacedName{Name: "cluster-scoped-cr"}, &cr)
+		Expect(apierrors.IsNotFound(err)).To(BeTrue())
+	})
+
+	It("aggregates errors from every bad resource, not just the first", func() {
+		class := &namespaceclassv1alpha1.NamespaceClass{
+			ObjectMeta: metav1.ObjectMeta{Name: "multi-bad-class"},
+			Spec: namespaceclassv1alpha1.NamespaceClassSpec{
+				Resources: []unstructured.Unstructured{
+					// Cluster-scoped: rejected by the RESTMapper scope check.
+					toUnstructured(`
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: multi-bad-cr
+rules: []
+`),
+					// Unresolvable: rejected because the RESTMapper can't map it at all.
+					toUnstructured(`
+apiVersion: bogus.example.com/v1
+kind: TotallyFake
+metadata:
+  name: multi-bad-fake
+`),
+					// Otherwise valid, to prove nothing gets applied once resolution
+					// as a whole has failed.
+					toUnstructured(`
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: multi-bad-cm
+data:
+  foo: bar
+`),
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, class)).To(Succeed())
+		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, class)).To(Succeed()) })
+
+		ns := &corev1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   "multi-bad-ns",
+				Labels: map[string]string{common.NamespaceClassLabel: class.Name},
+			},
+		}
+		Expect(k8sClient.Create(ctx, ns)).To(Succeed())
+		DeferCleanup(func() { forceDeleteNamespace(ctx, ns) })
+
+		reconciler := &NamespaceReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), manager: manager.NoOp()}
+		req := reconcile.Request{NamespacedName: types.NamespacedName{Name: ns.Name}}
+
+		_, err := reconciler.Reconcile(ctx, req)
+		Expect(err).To(HaveOccurred())
+
+		By("reporting both bad resources in the same error, not just the first one hit")
+		Expect(err.Error()).To(ContainSubstring("ClusterRole"))
+		Expect(err.Error()).To(ContainSubstring("TotallyFake"))
+
+		By("applying nothing at all, including the one otherwise-valid resource")
+		var cm corev1.ConfigMap
+		err = k8sClient.Get(ctx, types.NamespacedName{Namespace: ns.Name, Name: "multi-bad-cm"}, &cm)
+		Expect(apierrors.IsNotFound(err)).To(BeTrue())
 	})
 })

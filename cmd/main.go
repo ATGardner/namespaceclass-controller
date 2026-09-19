@@ -233,9 +233,8 @@ func transformFn(o any) (any, error) {
 		return o, nil
 	}
 
-	// gvk := u.GetObjectKind().GroupVersionKind()
 	res := &unstructured.Unstructured{}
-	res.SetGroupVersionKind(u.GetObjectKind().GroupVersionKind())
+	res.SetGroupVersionKind(u.GroupVersionKind())
 	res.SetName(u.GetName())
 	res.SetNamespace(u.GetNamespace())
 	res.SetLabels(u.GetLabels())
