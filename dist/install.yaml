@@ -562,7 +562,7 @@ webhooks:
       name: namespaceclass-controller-webhook-service
       namespace: namespaceclass-controller-system
       path: /validate-namespaceclass-akuity-io-v1alpha1-namespaceclass
-  failurePolicy: Fail
+  failurePolicy: Ignore
   name: vnamespaceclass-v1alpha1.kb.io
   rules:
   - apiGroups:

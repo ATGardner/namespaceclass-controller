@@ -36,11 +36,13 @@ var namespaceclasslog = logf.Log.WithName("namespaceclass-resource")
 // SetupNamespaceClassWebhookWithManager registers the webhook for NamespaceClass in the manager.
 func SetupNamespaceClassWebhookWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewWebhookManagedBy(mgr, &namespaceclassv1alpha1.NamespaceClass{}).
-		WithValidator(&NamespaceClassValidator{}).
+		WithValidator(&NamespaceClassValidator{
+			Client: mgr.GetClient(),
+		}).
 		Complete()
 }
 
-// +kubebuilder:webhook:path=/validate-namespaceclass-akuity-io-v1alpha1-namespaceclass,mutating=false,failurePolicy=fail,sideEffects=None,groups=namespaceclass.akuity.io,resources=namespaceclasses,verbs=create;update,versions=v1alpha1,name=vnamespaceclass-v1alpha1.kb.io,admissionReviewVersions=v1
+// +kubebuilder:webhook:path=/validate-namespaceclass-akuity-io-v1alpha1-namespaceclass,mutating=false,failurePolicy=ignore,sideEffects=None,groups=namespaceclass.akuity.io,resources=namespaceclasses,verbs=create;update,versions=v1alpha1,name=vnamespaceclass-v1alpha1.kb.io,admissionReviewVersions=v1
 
 // NamespaceClassValidator struct is responsible for validating the NamespaceClass resource
 // when it is created, updated, or deleted.

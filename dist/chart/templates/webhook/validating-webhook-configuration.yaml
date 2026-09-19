@@ -15,7 +15,7 @@ webhooks:
       name: {{ include "namespaceclass-controller.resourceName" (dict "suffix" "webhook-service" "context" $) }}
       namespace: {{ .Release.Namespace }}
       path: /validate-namespaceclass-akuity-io-v1alpha1-namespaceclass
-  failurePolicy: Fail
+  failurePolicy: Ignore
   name: vnamespaceclass-v1alpha1.kb.io
   rules:
   - apiGroups:

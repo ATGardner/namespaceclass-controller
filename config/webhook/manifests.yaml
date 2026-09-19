@@ -11,7 +11,7 @@ webhooks:
       name: webhook-service
       namespace: system
       path: /validate-namespaceclass-akuity-io-v1alpha1-namespaceclass
-  failurePolicy: Fail
+  failurePolicy: Ignore
   name: vnamespaceclass-v1alpha1.kb.io
   rules:
   - apiGroups:
