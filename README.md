@@ -195,7 +195,7 @@ allow the user to narrow down this role, in case they require to manage a more
 specific set of resources. At the moment, the Kustomize or helm chart does not
 support this.
 
-### Wildcard mutating webhoo
+### Wildcard mutating webhook
 
 The ResourceEnforcer webhook is set on very GVK in the cluster, and would
 trigger on every CREATE/UPDATE/DELETE of any resource, if not for the
