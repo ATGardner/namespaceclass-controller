@@ -211,7 +211,11 @@ func main() {
 			os.Exit(1)
 		}
 
-		controllerIdentity := fmt.Sprintf("system:serviceaccount:%s:%s", os.Getenv("POD_NAMESPACE"), os.Getenv("POD_SERVICE_ACCOUNT"))
+		controllerIdentity := fmt.Sprintf(
+			"system:serviceaccount:%s:%s",
+			os.Getenv("POD_NAMESPACE"),
+			os.Getenv("POD_SERVICE_ACCOUNT"),
+		)
 		enforcer.SetupResourceEnforcerWebhookWithManager(mgr, controllerIdentity)
 	}
 	// +kubebuilder:scaffold:builder

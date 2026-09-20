@@ -54,7 +54,7 @@ data:
   foo: whatever
 `)
 
-		resp := enforcer.Handle(ctx, newAdmissionRequest("enforcer-ns", &obj))
+		resp := enforcer.Handle(ctx, newAdmissionRequest(&obj))
 		Expect(resp.Allowed).To(BeTrue())
 		Expect(resp.Patches).To(BeEmpty())
 		Expect(resp.Warnings).To(BeEmpty())
@@ -72,7 +72,7 @@ data:
   foo: whatever
 `, common.ParentClassLabel))
 
-		resp := enforcer.Handle(ctx, newAdmissionRequest("enforcer-ns", &obj))
+		resp := enforcer.Handle(ctx, newAdmissionRequest(&obj))
 		Expect(resp.Allowed).To(BeTrue())
 		Expect(resp.Patches).To(BeEmpty())
 	})
@@ -103,7 +103,7 @@ data:
 		Expect(unstructured.SetNestedField(incoming.Object, "tampered", "data", "foo")).To(Succeed())
 		Expect(unstructured.SetNestedField(incoming.Object, "keep-me", "data", "extra")).To(Succeed())
 
-		resp := enforcer.Handle(ctx, newAdmissionRequest("enforcer-ns", incoming))
+		resp := enforcer.Handle(ctx, newAdmissionRequest(incoming))
 		Expect(resp.Allowed).To(BeTrue())
 		Expect(resp.Warnings).NotTo(BeEmpty())
 
@@ -138,7 +138,7 @@ data:
 			&class.Spec.Resources[0], "enforcer-ns", class)
 		Expect(err).NotTo(HaveOccurred())
 
-		resp := enforcer.Handle(ctx, newAdmissionRequest("enforcer-ns", incoming))
+		resp := enforcer.Handle(ctx, newAdmissionRequest(incoming))
 		Expect(resp.Allowed).To(BeTrue())
 		Expect(resp.Patches).To(BeEmpty())
 		Expect(resp.Warnings).To(BeEmpty())
@@ -157,7 +157,7 @@ func newTestClass(name string, resources ...unstructured.Unstructured) *namespac
 // never Object.Object. A handler that reads Object.Object without decoding
 // Raw into it first will see a request that looks unlabeled no matter what
 // obj actually contains.
-func newAdmissionRequest(namespace string, obj *unstructured.Unstructured) admission.Request {
+func newAdmissionRequest(obj *unstructured.Unstructured) admission.Request {
 	raw, err := obj.MarshalJSON()
 	Expect(err).NotTo(HaveOccurred())
 
@@ -167,7 +167,7 @@ func newAdmissionRequest(namespace string, obj *unstructured.Unstructured) admis
 			UID:       "00000000-0000-0000-0000-000000000000",
 			Kind:      metav1.GroupVersionKind{Group: gvk.Group, Version: gvk.Version, Kind: gvk.Kind},
 			Name:      obj.GetName(),
-			Namespace: namespace,
+			Namespace: "enforcer-ns",
 			Operation: admissionv1.Update,
 			Object:    runtime.RawExtension{Raw: raw},
 		},
