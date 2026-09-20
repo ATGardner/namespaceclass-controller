@@ -64,6 +64,7 @@ jobs:
           CHART_URL=$(fetch_package_url charts%2Fnamespaceclass-controller)
 
           sed -e "s|__VERSION__|$VERSION|g" \
+              -e "s|__TAG__|$GITHUB_REF_NAME|g" \
               -e "s|__IMAGE_URL__|$IMAGE_URL|g" \
               -e "s|__CHART_URL__|$CHART_URL|g" \
               .github/release-notes-template.md > release-notes.md
