@@ -28,7 +28,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/config"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -64,7 +63,7 @@ var _ = Describe("Controller wiring (via manager)", func() {
 			// harmless here since only one Manager is ever running at a
 			// time, but controller-runtime's cross-Manager uniqueness check
 			// doesn't know that.
-			Controller: config.Controller{SkipNameValidation: ptr.To(true)},
+			Controller: config.Controller{SkipNameValidation: new(true)},
 		})
 		Expect(err).NotTo(HaveOccurred())
 
