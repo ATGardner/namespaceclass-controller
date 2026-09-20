@@ -1,0 +1,19 @@
+apiVersion: namespaceclass.akuity.io/v1alpha1
+kind: NamespaceClass
+metadata:
+  labels:
+    app.kubernetes.io/name: namespaceclass-controller
+    app.kubernetes.io/managed-by: kustomize
+  name: public-network
+spec:
+  resources:
+  - apiVersion: networking.k8s.io/v1
+    kind: NetworkPolicy
+    metadata:
+      name: allow-public-ingress
+    spec:
+      podSelector: {}
+      policyTypes:
+      - Ingress
+      ingress:
+      - {} # no "from" restricts nothing: ingress allowed from any source, including the public internet
