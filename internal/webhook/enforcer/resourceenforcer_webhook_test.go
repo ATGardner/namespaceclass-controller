@@ -37,7 +37,11 @@ var _ = Describe("ResourceEnforcer Webhook", func() {
 	var enforcer *ResourceEnforcer
 
 	BeforeEach(func() {
-		enforcer = &ResourceEnforcer{Client: k8sClient, decoder: admission.NewDecoder(k8sClient.Scheme())}
+		enforcer = &ResourceEnforcer{
+			Client:             k8sClient,
+			controllerIdentity: "some-identity", // tests will always be "", so needs to be different
+			decoder:            admission.NewDecoder(k8sClient.Scheme()),
+		}
 	})
 
 	It("allows a resource with no parent-class label untouched", func() {
@@ -85,22 +89,21 @@ data:
 		Expect(k8sClient.Create(ctx, class)).To(Succeed())
 		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, class)).To(Succeed()) })
 
+		// Built the same way the real resource would be (ownerReference,
+		// parent label and all), so the only difference from what the
+		// enforcer computes as "desired" is the drift introduced below -
+		// not an artifact of a hand-written fixture missing fields the real
+		// object would always carry.
+		incoming, err := common.NewResourceBuilder(k8sClient).BuildFinalResource(
+			&class.Spec.Resources[0], "enforcer-ns", class)
+		Expect(err).NotTo(HaveOccurred())
+
 		// "foo" has drifted from the class's "bar"; "extra" isn't in the
 		// class's template at all, so it belongs to some other writer.
-		incoming := toUnstructured(fmt.Sprintf(`
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: drift-cm
-  namespace: enforcer-ns
-  labels:
-    %s: enforcer-drift-class
-data:
-  foo: tampered
-  extra: keep-me
-`, common.ParentClassLabel))
+		Expect(unstructured.SetNestedField(incoming.Object, "tampered", "data", "foo")).To(Succeed())
+		Expect(unstructured.SetNestedField(incoming.Object, "keep-me", "data", "extra")).To(Succeed())
 
-		resp := enforcer.Handle(ctx, newAdmissionRequest("enforcer-ns", &incoming))
+		resp := enforcer.Handle(ctx, newAdmissionRequest("enforcer-ns", incoming))
 		Expect(resp.Allowed).To(BeTrue())
 		Expect(resp.Warnings).NotTo(BeEmpty())
 
@@ -116,24 +119,23 @@ data:
 	})
 
 	It("makes no patch when the resource already matches the class", func() {
-		resourceTemplate := toUnstructured(`
+		class := newTestClass("enforcer-clean-class", toUnstructured(`
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: clean-cm
 data:
   foo: bar
-`)
-		class := newTestClass("enforcer-clean-class", resourceTemplate)
+`))
 		Expect(k8sClient.Create(ctx, class)).To(Succeed())
 		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, class)).To(Succeed()) })
 
-		// Built the same way the reconciler itself would build it, so this
-		// is byte-for-byte what "already converged" looks like - including
-		// the dynamic, UID-based ownerReference that no hand-written YAML
-		// fixture could replicate ahead of time.
-		rb := common.NewResourceBuilder(k8sClient)
-		incoming, err := rb.BuildFinalResource(&resourceTemplate, "enforcer-ns", class)
+		// Built via BuildFinalResource, same as the enforcer's own
+		// getDesiredResource does - so it carries the real ownerReference
+		// (with the class's actual UID) that a static YAML fixture can't
+		// reproduce, and the two are byte-for-byte the same object.
+		incoming, err := common.NewResourceBuilder(k8sClient).BuildFinalResource(
+			&class.Spec.Resources[0], "enforcer-ns", class)
 		Expect(err).NotTo(HaveOccurred())
 
 		resp := enforcer.Handle(ctx, newAdmissionRequest("enforcer-ns", incoming))
