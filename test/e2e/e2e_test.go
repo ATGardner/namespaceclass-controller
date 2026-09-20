@@ -332,6 +332,41 @@ var _ = Describe("Manager", Ordered, func() {
 	// deployed in BeforeAll above is shared (that's the expensive part), but
 	// nothing about a test's own resources is.
 	Context("NamespaceClass", func() {
+		It("rejects a NamespaceClass containing a cluster-scoped resource", func() {
+			// Unlike the webhook unit tests (which call ValidateCreate directly,
+			// in-process), this goes through the real apiserver -> TLS ->
+			// Service -> webhook path, proving the whole admission wiring
+			// (cert-manager cert, caBundle, RBAC for the webhook's own
+			// discovery) actually works, not just the validation logic.
+			className := "e2e-reject-cluster-scoped"
+			DeferCleanup(func() { deleteNamespaceClass(className) })
+
+			manifest := fmt.Sprintf(`
+apiVersion: namespaceclass.akuity.io/v1alpha1
+kind: NamespaceClass
+metadata:
+  name: %s
+spec:
+  resources:
+    - apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRole
+      metadata:
+        name: e2e-reject-cluster-role
+      rules: []
+`, className)
+
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(manifest)
+			output, err := utils.Run(cmd)
+			Expect(err).To(HaveOccurred(), "kubectl apply should have been rejected by the validating webhook")
+			Expect(output).To(ContainSubstring("not namespaced"))
+
+			By("the rejected NamespaceClass never actually landing in the cluster")
+			cmd = exec.Command("kubectl", "get", "namespaceclass", className)
+			_, err = utils.Run(cmd)
+			Expect(err).To(HaveOccurred(), "rejected NamespaceClass should not exist")
+		})
+
 		It("applies a class's resources, resolving {{ .namespace }}", func() {
 			className, nsName, cmName := "e2e-apply-class", "e2e-apply-ns", "e2e-apply-cm"
 			DeferCleanup(func() {
@@ -394,6 +429,42 @@ var _ = Describe("Manager", Ordered, func() {
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(val).To(Equal(nsName))
 			}).Should(Succeed())
+		})
+
+		It("reverts a direct edit to a managed field synchronously via the mutating webhook, warning the client", func() {
+			// The drift test above only proves *something* eventually reverts
+			// the change - the watcher would pass that test on its own. This
+			// one checks the value immediately after kubectl returns, with no
+			// Eventually, which only a synchronous admission-time revert (not
+			// the watcher's later, event-driven one) can satisfy - and checks
+			// for the warning the mutating webhook attaches to its response.
+			className, nsName, cmName := "e2e-webhook-revert-class", "e2e-webhook-revert-ns", "e2e-webhook-revert-cm"
+			DeferCleanup(func() {
+				deleteTestNamespace(nsName)
+				deleteNamespaceClass(className)
+			})
+
+			applyNamespaceClass(className, cmName)
+			applyLabeledNamespace(nsName, className)
+
+			Eventually(func(g Gomega) {
+				val, err := configMapOwner(nsName, cmName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(val).To(Equal(nsName))
+			}).Should(Succeed())
+
+			By("patching the managed field directly and capturing the admission response")
+			cmd := exec.Command("kubectl", "patch", "configmap", cmName, "-n", nsName,
+				"--type=merge", "-p", `{"data":{"owner":"someone-else"}}`)
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "the write itself is still allowed, just reverted")
+			Expect(output).To(ContainSubstring("Warning:"))
+			Expect(output).To(ContainSubstring("reverted"))
+
+			By("the value already being correct immediately after the patch returns, not just eventually")
+			val, err := configMapOwner(nsName, cmName)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal(nsName), "the mutating webhook should have reverted it in the same admission call")
 		})
 
 		It("deletes the managed resource when the class label is removed", func() {
