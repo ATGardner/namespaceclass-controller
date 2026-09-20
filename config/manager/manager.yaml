@@ -58,13 +58,22 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       containers:
-      - command:
+      - name: manager
+        image: controller:latest
+        env:
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: POD_SERVICE_ACCOUNT
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.serviceAccountName
+        command:
         - /manager
         args:
           - --leader-elect
           - --health-probe-bind-address=:8081
-        image: controller:latest
-        name: manager
         ports:
         - containerPort: 8081
           name: health

@@ -40,6 +40,16 @@ The controller image and Helm chart are published to GHCR on every tagged
 release (see `.github/workflows/release.yml`). To run it in any cluster,
 no local build required:
 
+**Prerequisite:** the chart's validating and mutating webhooks need TLS
+certs, provisioned via [cert-manager](https://cert-manager.io). Install it
+first if the cluster doesn't already have it:
+
+```sh
+helm install cert-manager oci://quay.io/jetstack/charts/cert-manager \
+  --namespace cert-manager --create-namespace \
+  --version v1.21.2 --set crds.enabled=true
+```
+
 ```sh
 helm install namespaceclass-controller \
   oci://ghcr.io/atgardner/charts/namespaceclass-controller \
@@ -51,6 +61,12 @@ helm install namespaceclass-controller \
 Then apply a `NamespaceClass` and label a namespace with
 `namespaceclass.akuity.io/name=<class-name>` — see `config/samples/`.
 
+To skip the cert-manager dependency entirely, pass
+`--set certManager.enabled=false,webhook.enabled=false` — this disables both
+webhooks (admission-time validation and real-time drift enforcement), not
+just their certs; the reconciler's own reconcile-loop checks still cover the
+same ground, just without the immediate feedback.
+
 ## Getting Started
 
 ### Prerequisites
@@ -58,6 +74,8 @@ Then apply a `NamespaceClass` and label a namespace with
 - docker version 17.03+.
 - kubectl version v1.11.3+.
 - Access to a Kubernetes v1.11.3+ cluster.
+- [cert-manager](https://cert-manager.io) installed in the cluster (required
+  for webhook TLS certs — see Quick Install above).
 
 ### To Deploy on the cluster
 **Build and push your image to the location specified by `IMG`:**

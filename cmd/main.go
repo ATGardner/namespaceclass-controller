@@ -19,6 +19,7 @@ package main
 import (
 	"crypto/tls"
 	"flag"
+	"fmt"
 	"os"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -210,7 +211,8 @@ func main() {
 			os.Exit(1)
 		}
 
-		enforcer.SetupResourceEnforcerWebhookWithManager(mgr)
+		controllerIdentity := fmt.Sprintf("system:serviceaccount:%s:%s", os.Getenv("POD_NAMESPACE"), os.Getenv("POD_SERVICE_ACCOUNT"))
+		enforcer.SetupResourceEnforcerWebhookWithManager(mgr, controllerIdentity)
 	}
 	// +kubebuilder:scaffold:builder
 

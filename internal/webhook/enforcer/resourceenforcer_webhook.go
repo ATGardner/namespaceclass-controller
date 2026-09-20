@@ -17,21 +17,28 @@ import (
 )
 
 type ResourceEnforcer struct {
-	Client  client.Client
-	decoder admission.Decoder
+	Client client.Client
+
+	controllerIdentity string
+	decoder            admission.Decoder
 }
 
-func SetupResourceEnforcerWebhookWithManager(mgr ctrl.Manager) {
+func SetupResourceEnforcerWebhookWithManager(mgr ctrl.Manager, controllerIdentity string) {
 	mgr.GetWebhookServer().Register(
 		"/mutate-namespaceclass-managed-resources",
 		&webhook.Admission{Handler: &ResourceEnforcer{
-			Client:  mgr.GetClient(),
-			decoder: admission.NewDecoder(mgr.GetScheme()),
+			Client:             mgr.GetClient(),
+			controllerIdentity: controllerIdentity,
+			decoder:            admission.NewDecoder(mgr.GetScheme()),
 		}},
 	)
 }
 
 func (r *ResourceEnforcer) Handle(ctx context.Context, req admission.Request) admission.Response {
+	if req.UserInfo.Username == r.controllerIdentity {
+		return admission.Allowed("")
+	}
+
 	log := logf.FromContext(ctx)
 
 	desired, err := r.getDesiredResource(ctx, req)
