@@ -165,13 +165,11 @@ mentioned — an extra label, an extra `data` key someone else added — are
 left alone, because this controller never claimed ownership of them in the
 first place.
 
-This is a deliberate choice, not a gap: it's the same field-manager model
-Kubernetes itself uses so multiple writers (an HPA and a Deployment
-controller both touching one Deployment, a mutating webhook injecting
-compliance labels, an auto-populated `ServiceAccount` field) can coexist on
-one object without fighting over fields they don't own. A `NamespaceClass`
-resource is expected to share space with other legitimate cluster tooling
-under this model, rather than assume it's the object's only writer.
+This approach allows other tools to manage their own specific fields or
+compliance labels, without fighting over with the NamespaceController. A
+`NamespaceClass` resource is expected to share space with other legitimate
+cluster tooling under this model, rather than assume it's the object's only
+writer.
 
 **Future work:** some use cases (e.g. a security baseline that must never
 drift, even by an added field) want the opposite guarantee — full,
@@ -188,19 +186,20 @@ behavior globally. Not implemented here.
 
 Both webhooks have a `failurePolicy: ignore`, to make sure changes may reach
 the cluster in case of a temporary network issue. Webhook servers can be
-temporarily down, or unresponsive, and I didn't want that to block users from
-managing their clusters. The 2nd line of defence (described next) makes sure a
-bad-actor will not be able to cause too much damage if the webhooks are down.
+temporarily down, or unresponsive, and it shouldn't block users from managing
+their clusters. The 2nd line of defence (described next) makes sure a bad-actor
+will not be able to cause too much damage if the webhooks are down.
 
 ### Two enforcement layers
 
 The admission-webhook makes sure no NamespaceClass is being created with a
 cluster-scoped resource in its `spec.resources`, and the mutating-webhook makes
-sure a client can't change any of the managed fields defined in the
-NamespaceClass. In case one or the other fails (or is even disabled during the
-installation), a 2nd line of defence exists to protect against these changes.
+sure a client can't change any of the managed fields (of managed resources)
+defined in the NamespaceClass. In case one or the other fails (or is even
+disabled during the installation), a 2nd line of defence exists to protect
+against these changes.
 
-The NamespaceController makes sure to never apply any resources from a
+The NamespaceController makes sure to never apply *any* resources from a
 NamespaceClass that has cluster-scoped resources, and the ResourceWatcher
 watches any GVK that a NamespaceClass manages, and enforces its values to
 remain as defined in its class whenever they change.
@@ -208,10 +207,10 @@ remain as defined in its class whenever they change.
 ### Broad default RBAC
 
 The controller requires a `*/*/*` RBAC role, because it should be able to
-managed any (namespaced) kind in the cluster. It might be worthwhile to
-allow the user to narrow down this role, in case they require to manage a more
-specific set of resources. At the moment, the Kustomize or helm chart does not
-support this.
+managed any (namespaced) kind in the cluster.
+
+**Future work:** It might be worthwhile to allow the user to narrow down this
+role, in case they require to manage a more specific set of resources.
 
 ### Wildcard mutating webhook
 
@@ -223,13 +222,13 @@ that are managed by a NamespaceClass.
 
 ### Cleanup mechanism
 
-The NamespaceClass sets itself as the `ownerRef` for each resource it manages.
-When the class is deleted, all of its managed resources (across all Namespaces
-that reference the deleting class) will get deleted as well. The NamespaceClass
-will get a finalizer, preventing it from being completely removed from the
-cluster until all of its referencing Namespaces no longer contain any managed
-resources. Only then would the finalizer be removed, and the resource be
-completely deleted from the cluster.
+The NamespaceClass sets itself as the `ownerReference` for each resource it
+manages. When the class is deleted, all of its managed resources (across all
+Namespaces that reference the deleting class) will get deleted as well. The
+NamespaceClass will get a finalizer, preventing it from being completely
+removed from the cluster until all of its referencing Namespaces no longer
+contain any managed resources. Only then would the finalizer be removed, and
+the resource be completely deleted from the cluster.
 
 ## Getting Started
 
@@ -268,7 +267,7 @@ make deploy IMG=<some-registry>/namespaceclass-controller:tag
 privileges or be logged in as admin.
 
 **Create instances of your solution**
-You can apply the samples (examples) from the config/sample:
+You can apply the samples (examples) from the config/samples:
 
 ```sh
 kubectl apply -k config/samples/
