@@ -116,6 +116,27 @@ rules: []
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("not namespaced"))
 		})
+
+		It("allows an update on an object already being deleted, even with invalid resources", func() {
+			// Simulates reconcileDelete's finalizer-removal update on a class
+			// that only ever got created because the webhook was unreachable
+			// at the time. Without this, that update would be rejected by
+			// the same check that should have caught it at creation - making
+			// the object permanently undeletable.
+			obj := newTestNamespaceClass(toUnstructured(`
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: stuck-cr
+rules: []
+`))
+			now := metav1.Now()
+			obj.DeletionTimestamp = &now
+			oldObj := obj.DeepCopy()
+
+			_, err := validator.ValidateUpdate(ctx, oldObj, obj)
+			Expect(err).NotTo(HaveOccurred())
+		})
 	})
 })
 

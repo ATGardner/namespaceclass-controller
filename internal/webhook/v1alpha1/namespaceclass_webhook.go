@@ -72,6 +72,10 @@ func (v *NamespaceClassValidator) ValidateDelete(_ context.Context, obj *namespa
 }
 
 func (v *NamespaceClassValidator) validateNamespaceClass(obj *namespaceclassv1alpha1.NamespaceClass) error {
+	if !obj.DeletionTimestamp.IsZero() {
+		return nil
+	}
+
 	var errs field.ErrorList
 
 	for i, resource := range obj.Spec.Resources {
