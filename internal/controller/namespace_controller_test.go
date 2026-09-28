@@ -511,4 +511,209 @@ data:
 		err = k8sClient.Get(ctx, types.NamespacedName{Namespace: ns.Name, Name: "multi-bad-cm"}, &cm)
 		Expect(apierrors.IsNotFound(err)).To(BeTrue())
 	})
+
+	// The next two specs cover a reconcile that fails partway through the
+	// apply loop: every resource resolves, the first is applied, and the API
+	// server rejects the second (a ConfigMap key with a space in it passes
+	// resolution but fails server-side validation). If the desired set then
+	// changes before a reconcile succeeds, the already-applied resource must
+	// still be pruned. See issue #2.
+	It("removes resources applied by a partly failed reconcile after the namespace switches class", func() {
+		classA := &namespaceclassv1alpha1.NamespaceClass{
+			ObjectMeta: metav1.ObjectMeta{Name: "partial-switch-class-a"},
+			Spec: namespaceclassv1alpha1.NamespaceClassSpec{
+				Resources: []unstructured.Unstructured{
+					toUnstructured(`
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: partial-switch-ok
+data:
+  foo: bar
+`),
+					toUnstructured(`
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: partial-switch-rejected
+data:
+  "not a valid key": bar
+`),
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, classA)).To(Succeed())
+		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, classA)).To(Succeed()) })
+
+		classB := &namespaceclassv1alpha1.NamespaceClass{
+			ObjectMeta: metav1.ObjectMeta{Name: "partial-switch-class-b"},
+			Spec: namespaceclassv1alpha1.NamespaceClassSpec{
+				Resources: []unstructured.Unstructured{toUnstructured(`
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: partial-switch-from-b
+data:
+  foo: baz
+`)},
+			},
+		}
+		Expect(k8sClient.Create(ctx, classB)).To(Succeed())
+		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, classB)).To(Succeed()) })
+
+		ns := &corev1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   "partial-switch-ns",
+				Labels: map[string]string{common.NamespaceClassLabel: classA.Name},
+			},
+		}
+		Expect(k8sClient.Create(ctx, ns)).To(Succeed())
+		DeferCleanup(func() { forceDeleteNamespace(ctx, ns) })
+
+		reconciler := &NamespaceReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), manager: manager.NoOp()}
+		req := reconcile.Request{NamespacedName: types.NamespacedName{Name: ns.Name}}
+
+		By("reconciling class A, which applies the first resource and fails on the second")
+		_, err := reconciler.Reconcile(ctx, req)
+		Expect(err).To(HaveOccurred())
+
+		var okCM corev1.ConfigMap
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns.Name, Name: "partial-switch-ok"}, &okCM)).To(Succeed())
+
+		By("switching the namespace to class B before any reconcile succeeds")
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: ns.Name}, ns)).To(Succeed())
+		ns.Labels[common.NamespaceClassLabel] = classB.Name
+		Expect(k8sClient.Update(ctx, ns)).To(Succeed())
+
+		_, err = reconciler.Reconcile(ctx, req)
+		Expect(err).NotTo(HaveOccurred())
+
+		var fromB corev1.ConfigMap
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns.Name, Name: "partial-switch-from-b"}, &fromB)).To(Succeed())
+
+		By("pruning the resource class A applied before the failure")
+		err = k8sClient.Get(ctx, types.NamespacedName{Namespace: ns.Name, Name: "partial-switch-ok"}, &okCM)
+		Expect(apierrors.IsNotFound(err)).To(BeTrue())
+	})
+
+	It("removes resources applied by a partly failed reconcile after they are dropped from the class spec", func() {
+		class := &namespaceclassv1alpha1.NamespaceClass{
+			ObjectMeta: metav1.ObjectMeta{Name: "partial-edit-class"},
+			Spec: namespaceclassv1alpha1.NamespaceClassSpec{
+				Resources: []unstructured.Unstructured{
+					toUnstructured(`
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: partial-edit-ok
+data:
+  foo: bar
+`),
+					toUnstructured(`
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: partial-edit-rejected
+data:
+  "not a valid key": bar
+`),
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, class)).To(Succeed())
+		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, class)).To(Succeed()) })
+
+		ns := &corev1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   "partial-edit-ns",
+				Labels: map[string]string{common.NamespaceClassLabel: class.Name},
+			},
+		}
+		Expect(k8sClient.Create(ctx, ns)).To(Succeed())
+		DeferCleanup(func() { forceDeleteNamespace(ctx, ns) })
+
+		reconciler := &NamespaceReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), manager: manager.NoOp()}
+		req := reconcile.Request{NamespacedName: types.NamespacedName{Name: ns.Name}}
+
+		By("reconciling, which applies the first resource and fails on the second")
+		_, err := reconciler.Reconcile(ctx, req)
+		Expect(err).To(HaveOccurred())
+
+		var okCM corev1.ConfigMap
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns.Name, Name: "partial-edit-ok"}, &okCM)).To(Succeed())
+
+		By("replacing both resources in the class spec before any reconcile succeeds")
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: class.Name}, class)).To(Succeed())
+		class.Spec.Resources = []unstructured.Unstructured{toUnstructured(`
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: partial-edit-replacement
+data:
+  foo: baz
+`)}
+		Expect(k8sClient.Update(ctx, class)).To(Succeed())
+
+		_, err = reconciler.Reconcile(ctx, req)
+		Expect(err).NotTo(HaveOccurred())
+
+		var replacement corev1.ConfigMap
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns.Name, Name: "partial-edit-replacement"}, &replacement)).To(Succeed())
+
+		By("pruning the resource applied before the failure")
+		err = k8sClient.Get(ctx, types.NamespacedName{Namespace: ns.Name, Name: "partial-edit-ok"}, &okCM)
+		Expect(apierrors.IsNotFound(err)).To(BeTrue())
+	})
+
+	// Guards the ownership check that pruning by label must keep: the parent
+	// label alone isn't proof the controller created a resource, e.g. a user
+	// may copy a managed manifest, labels included.
+	It("leaves a resource that carries the parent label but has no NamespaceClass owner", func() {
+		class := &namespaceclassv1alpha1.NamespaceClass{
+			ObjectMeta: metav1.ObjectMeta{Name: "unowned-class"},
+			Spec: namespaceclassv1alpha1.NamespaceClassSpec{
+				Resources: []unstructured.Unstructured{toUnstructured(`
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: unowned-managed-cm
+data:
+  foo: bar
+`)},
+			},
+		}
+		Expect(k8sClient.Create(ctx, class)).To(Succeed())
+		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, class)).To(Succeed()) })
+
+		ns := &corev1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   "unowned-ns",
+				Labels: map[string]string{common.NamespaceClassLabel: class.Name},
+			},
+		}
+		Expect(k8sClient.Create(ctx, ns)).To(Succeed())
+		DeferCleanup(func() { forceDeleteNamespace(ctx, ns) })
+
+		userCM := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "unowned-user-cm",
+				Namespace: ns.Name,
+				Labels:    map[string]string{common.ParentClassLabel: class.Name},
+			},
+			Data: map[string]string{"foo": "user"},
+		}
+		Expect(k8sClient.Create(ctx, userCM)).To(Succeed())
+
+		reconciler := &NamespaceReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), manager: manager.NoOp()}
+		req := reconcile.Request{NamespacedName: types.NamespacedName{Name: ns.Name}}
+
+		_, err := reconciler.Reconcile(ctx, req)
+		Expect(err).NotTo(HaveOccurred())
+
+		var managed corev1.ConfigMap
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns.Name, Name: "unowned-managed-cm"}, &managed)).To(Succeed())
+
+		var got corev1.ConfigMap
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns.Name, Name: userCM.Name}, &got)).To(Succeed())
+	})
 })
