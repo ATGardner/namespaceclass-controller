@@ -95,15 +95,14 @@ var _ = Describe("resourceWatcherManager", func() {
 		scheme = newScheme()
 	})
 
-	Describe("getAllGVKs", func() {
+	Describe("WatchedGVKs", func() {
 		It("unions GVKs across classes without duplicating shared ones", func() {
 			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
 				classWithResources("a", configMap("cm-a")),
 				classWithResources("b", configMap("cm-b"), serviceAccount("sa-b")),
 			).Build()
 
-			mgr := New(nil, c, nil).(*resourceWatcherManager)
-			gvks, err := mgr.getAllGVKs(context.Background())
+			gvks, err := WatchedGVKs(context.Background(), c)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(gvks).To(HaveLen(2))
 			Expect(gvks.Has(schema.GroupVersionKind{Version: "v1", Kind: "ConfigMap"})).To(BeTrue())
@@ -112,10 +111,20 @@ var _ = Describe("resourceWatcherManager", func() {
 
 		It("returns an empty set when there are no classes", func() {
 			c := fake.NewClientBuilder().WithScheme(scheme).Build()
-			mgr := New(nil, c, nil).(*resourceWatcherManager)
-			gvks, err := mgr.getAllGVKs(context.Background())
+			gvks, err := WatchedGVKs(context.Background(), c)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(gvks).To(BeEmpty())
+		})
+
+		It("includes a GVK dropped from a class's spec but still in its status", func() {
+			class := classWithResources("a", configMap("cm-a"))
+			class.Status.AppliedGVKs = []metav1.GroupVersionKind{{Version: "v1", Kind: "ServiceAccount"}}
+			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(class).Build()
+
+			gvks, err := WatchedGVKs(context.Background(), c)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(gvks).To(HaveLen(2))
+			Expect(gvks.Has(schema.GroupVersionKind{Version: "v1", Kind: "ServiceAccount"})).To(BeTrue())
 		})
 	})
 

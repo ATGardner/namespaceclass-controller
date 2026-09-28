@@ -236,6 +236,84 @@ data:
 			return errors.IsNotFound(err)
 		}).Should(BeTrue())
 	})
+
+	It("removes a resource whose kind no class uses any more", func() {
+		// Dropping the class's only Secret also drops Secret from every
+		// class, so the Secret watcher is removed. Pruning must still find
+		// the old Secret. See issue #2.
+		ctx := context.Background()
+		const (
+			className  = "retired-gvk-class"
+			nsName     = "retired-gvk-ns"
+			cmName     = "retired-gvk-cm"
+			secretName = "retired-gvk-secret"
+		)
+
+		cm := toUnstructured(`
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: retired-gvk-cm
+data:
+  foo: bar
+`)
+		class := &namespaceclassv1alpha1.NamespaceClass{
+			ObjectMeta: metav1.ObjectMeta{Name: className},
+			Spec: namespaceclassv1alpha1.NamespaceClassSpec{
+				Resources: []unstructured.Unstructured{cm, toUnstructured(`
+apiVersion: v1
+kind: Secret
+metadata:
+  name: retired-gvk-secret
+stringData:
+  foo: bar
+`)},
+			},
+		}
+		Expect(k8sClient.Create(ctx, class)).To(Succeed())
+
+		ns := &corev1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   nsName,
+				Labels: map[string]string{common.NamespaceClassLabel: className},
+			},
+		}
+		Expect(k8sClient.Create(ctx, ns)).To(Succeed())
+
+		By("both resources getting created")
+		Eventually(func() error {
+			return k8sClient.Get(ctx, types.NamespacedName{Namespace: nsName, Name: secretName}, &corev1.Secret{})
+		}).Should(Succeed())
+		Eventually(func() error {
+			return k8sClient.Get(ctx, types.NamespacedName{Namespace: nsName, Name: cmName}, &corev1.ConfigMap{})
+		}).Should(Succeed())
+
+		By("editing the class to drop the Secret")
+		// Retried as a unit for the same reason as the edit above.
+		Eventually(func() error {
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: className}, class); err != nil {
+				return err
+			}
+			class.Spec.Resources = []unstructured.Unstructured{cm}
+			return k8sClient.Update(ctx, class)
+		}).Should(Succeed())
+
+		Eventually(func() bool {
+			err := k8sClient.Get(ctx, types.NamespacedName{Namespace: nsName, Name: secretName}, &corev1.Secret{})
+			return errors.IsNotFound(err)
+		}).Should(BeTrue())
+
+		// Cleaned up synchronously for the same reason as above.
+		By("deleting the Namespace and the class, and the whole loop closing on its own")
+		Expect(k8sClient.Delete(ctx, ns)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, class)).To(Succeed())
+
+		Eventually(func() bool {
+			got := &namespaceclassv1alpha1.NamespaceClass{}
+			err := k8sClient.Get(ctx, types.NamespacedName{Name: className}, got)
+			return errors.IsNotFound(err)
+		}).Should(BeTrue())
+	})
 })
 
 func toUnstructured(data string) unstructured.Unstructured {

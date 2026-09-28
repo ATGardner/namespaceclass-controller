@@ -20,14 +20,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"slices"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -44,13 +46,25 @@ import (
 )
 
 // appliedResource identifies one resource this controller manages in a
-// namespace. Group+Version+Kind+Name is the identity: it's already present
-// wherever the resource is defined, so no separate tracking key is needed.
+// namespace, with the version needed to address it. It's also the entry
+// format of the legacy applied-resources annotation.
 type appliedResource struct {
 	Group   string `json:"group"`
 	Version string `json:"version"`
 	Kind    string `json:"kind"`
 	Name    string `json:"name"`
+}
+
+// resourceKey identifies a resource within a namespace regardless of API
+// version: the same object is served under every version of its kind, and
+// must not be mistaken for a stale copy of itself.
+type resourceKey struct {
+	schema.GroupKind
+	Name string
+}
+
+func (a appliedResource) key() resourceKey {
+	return resourceKey{GroupKind: schema.GroupKind{Group: a.Group, Kind: a.Kind}, Name: a.Name}
 }
 
 // NamespaceReconciler reconciles a Namespace object
@@ -97,7 +111,7 @@ func (r *NamespaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 	}()
 
-	var desired []appliedResource
+	desired := sets.New[resourceKey]()
 	rb := common.NewResourceBuilder(r.Client)
 	if nsClass != nil && nsClass.DeletionTimestamp.IsZero() {
 		var errs field.ErrorList
@@ -122,32 +136,29 @@ func (r *NamespaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			return ctrl.Result{}, fmt.Errorf("failed to resolve NamespaceClass resources: %w", errs.ToAggregate())
 		}
 
-		desired = make([]appliedResource, len(resolved))
-		for i, res := range resolved {
+		if err := r.recordAppliedGVKs(ctx, nsClass); err != nil {
+			log.Error(err, "Failed to record applied GVKs on the NamespaceClass")
+			return ctrl.Result{}, fmt.Errorf("failed to record applied GVKs on NamespaceClass %s: %w", nsClass.Name, err)
+		}
+
+		for _, res := range resolved {
 			//nolint:staticcheck // client.Apply is deprecated in favor of client.Client.Apply(), which requires typed apply configurations we don't have for arbitrary unstructured resources
 			if err := r.Patch(ctx, res, client.Apply, client.ForceOwnership, client.FieldOwner(common.FieldOwner)); err != nil {
 				log.Error(err, "Failed to apply resource", "kind", res.GroupVersionKind().Kind, "name", res.GetName())
 				return ctrl.Result{}, fmt.Errorf("failed to apply resource %s/%s: %w", res.GroupVersionKind().Kind, res.GetName(), err)
 			}
 
-			desired[i] = toAppliedResource(res)
+			desired.Insert(toAppliedResource(res).key())
 		}
 	}
 
-	applied, err := readAppliedResources(namespace)
+	stale, err := r.findStaleResources(ctx, namespace, desired)
 	if err != nil {
-		// Unreadable record: treat as empty rather than fail reconciliation.
-		// The write below repairs it, and any orphan this misses is caught
-		// once its identity resurfaces in a future applied set.
-		log.Error(err, "Failed to parse applied-resources annotation, resetting it")
-		applied = nil
+		log.Error(err, "Failed to find stale resources")
+		return ctrl.Result{}, fmt.Errorf("failed to find stale resources: %w", err)
 	}
 
-	for _, res := range applied {
-		if slices.Contains(desired, res) {
-			continue
-		}
-
+	for _, res := range stale {
 		if err := r.deleteOrphanResource(ctx, res, namespace.Name); err != nil {
 			log.Error(err, "Failed to delete stale resource", "kind", res.Kind, "name", res.Name)
 			return ctrl.Result{}, fmt.Errorf("failed to delete stale resource %s/%s: %w", res.Kind, res.Name, err)
@@ -156,20 +167,14 @@ func (r *NamespaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		log.Info("Deleted stale resource", "kind", res.Kind, "name", res.Name)
 	}
 
-	if !slices.Equal(applied, desired) {
-		patch := client.MergeFrom(namespace.DeepCopy())
-		if err := setAppliedResources(namespace, desired); err != nil {
-			log.Error(err, "Failed to encode applied-resources annotation")
-			return ctrl.Result{}, fmt.Errorf("failed to encode applied-resources annotation: %w", err)
-		}
-
-		if err := r.Patch(ctx, namespace, patch); err != nil {
-			log.Error(err, "Failed to update applied-resources annotation")
-			return ctrl.Result{}, fmt.Errorf("failed to update applied-resources annotation: %w", err)
-		}
+	// Only once every resource it lists is gone, so a failed delete above
+	// leaves the annotation in place for the retry.
+	if err := r.removeLegacyAppliedResources(ctx, namespace); err != nil {
+		log.Error(err, "Failed to remove legacy applied-resources annotation")
+		return ctrl.Result{}, fmt.Errorf("failed to remove legacy applied-resources annotation: %w", err)
 	}
 
-	log.Info("Done reconciling Namespace", "resources", desired)
+	log.Info("Done reconciling Namespace", "resources", desired.Len())
 	return ctrl.Result{}, nil
 }
 
@@ -289,8 +294,112 @@ func toAppliedResource(u *unstructured.Unstructured) appliedResource {
 	}
 }
 
-// readAppliedResources returns the resources recorded from the last
-// successful reconcile, or nil if none are recorded yet.
+// recordAppliedGVKs adds any of nsClass's spec GVKs missing from its
+// status.appliedGVKs, before any resource of them is applied. Otherwise a
+// GVK dropped from the spec before the NamespaceClass controller recorded it
+// would never be watched, and its resources never pruned.
+func (r *NamespaceReconciler) recordAppliedGVKs(ctx context.Context, nsClass *namespaceclassv1alpha1.NamespaceClass) error {
+	recorded := sets.New[schema.GroupVersionKind]()
+	for _, gvk := range nsClass.Status.AppliedGVKs {
+		recorded.Insert(schema.GroupVersionKind(gvk))
+	}
+
+	missing := nsClass.GetGvks().Difference(recorded)
+	if missing.Len() == 0 {
+		return nil
+	}
+
+	// Optimistic lock: the NamespaceClass controller writes this list too,
+	// and a blind overwrite could drop a GVK it's still retiring.
+	patch := client.MergeFromWithOptions(nsClass.DeepCopy(), client.MergeFromWithOptimisticLock{})
+	for gvk := range missing {
+		nsClass.Status.AppliedGVKs = append(nsClass.Status.AppliedGVKs, metav1.GroupVersionKind(gvk))
+	}
+
+	return r.Status().Patch(ctx, nsClass, patch)
+}
+
+// findStaleResources returns every resource in ns that some NamespaceClass
+// applied and that isn't in desired. It sweeps every watched GVK for
+// resources carrying the parent label and owned by a NamespaceClass, plus
+// (for now) the entries of the legacy applied-resources annotation.
+func (r *NamespaceReconciler) findStaleResources(
+	ctx context.Context,
+	ns *corev1.Namespace,
+	desired sets.Set[resourceKey],
+) (map[resourceKey]appliedResource, error) {
+	gvks, err := manager.WatchedGVKs(ctx, r.Client)
+	if err != nil {
+		return nil, err
+	}
+
+	stale := map[resourceKey]appliedResource{}
+	for gvk := range gvks {
+		list := &unstructured.UnstructuredList{}
+		list.SetGroupVersionKind(gvk.GroupVersion().WithKind(gvk.Kind + "List"))
+		if err := r.List(ctx, list, client.InNamespace(ns.Name), client.HasLabels{common.ParentClassLabel}); err != nil {
+			// The kind itself is gone (e.g. its CRD was deleted), so no
+			// resources of it can remain.
+			if meta.IsNoMatchError(err) {
+				continue
+			}
+
+			return nil, fmt.Errorf("failed listing %s resources: %w", gvk, err)
+		}
+
+		for i := range list.Items {
+			u := &list.Items[i]
+			if !common.IsOwnedByClass(u, u.GetLabels()[common.ParentClassLabel]) {
+				continue
+			}
+
+			res := appliedResource{Group: gvk.Group, Version: gvk.Version, Kind: gvk.Kind, Name: u.GetName()}
+			if !desired.Has(res.key()) {
+				stale[res.key()] = res
+			}
+		}
+	}
+
+	// TODO(#4): remove once no Namespace carries the annotation any more,
+	// in the release after the one that stopped writing it. Until then it
+	// still covers resources whose GVK no class watches any more.
+	legacy, err := readAppliedResources(ns)
+	if err != nil {
+		// Unreadable record: skip it. The sweep above still covers every
+		// resource of a watched GVK, and the annotation is removed after.
+		logf.FromContext(ctx).Error(err, "Failed to parse legacy applied-resources annotation, ignoring it")
+	}
+
+	for _, res := range legacy {
+		if !desired.Has(res.key()) {
+			stale[res.key()] = res
+		}
+	}
+
+	return stale, nil
+}
+
+// removeLegacyAppliedResources deletes the applied-resources annotation that
+// earlier versions of the controller wrote.
+//
+// TODO(#4): remove together with readAppliedResources.
+func (r *NamespaceReconciler) removeLegacyAppliedResources(ctx context.Context, ns *corev1.Namespace) error {
+	if _, ok := ns.GetAnnotations()[common.AppliedResourcesAnnotation]; !ok {
+		return nil
+	}
+
+	patch := client.MergeFrom(ns.DeepCopy())
+	annotations := ns.GetAnnotations()
+	delete(annotations, common.AppliedResourcesAnnotation)
+	ns.SetAnnotations(annotations)
+
+	return r.Patch(ctx, ns, patch)
+}
+
+// readAppliedResources returns the resources recorded in the legacy
+// applied-resources annotation, or nil if there is none.
+//
+// TODO(#4): remove together with removeLegacyAppliedResources.
 func readAppliedResources(ns *corev1.Namespace) ([]appliedResource, error) {
 	raw, ok := ns.GetAnnotations()[common.AppliedResourcesAnnotation]
 	if !ok || raw == "" {
@@ -303,23 +412,4 @@ func readAppliedResources(ns *corev1.Namespace) ([]appliedResource, error) {
 	}
 
 	return resources, nil
-}
-
-// setAppliedResources records the given resources as the current applied set
-// on the Namespace.
-func setAppliedResources(ns *corev1.Namespace, resources []appliedResource) error {
-	raw, err := json.Marshal(resources)
-	if err != nil {
-		return err
-	}
-
-	annotations := ns.GetAnnotations()
-	if annotations == nil {
-		annotations = map[string]string{}
-	}
-
-	annotations[common.AppliedResourcesAnnotation] = string(raw)
-	ns.SetAnnotations(annotations)
-
-	return nil
 }

@@ -6,8 +6,10 @@ import (
 	"text/template"
 
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/yaml"
@@ -25,11 +27,13 @@ const ParentClassLabel = "namespaceclass.akuity.io/parent"
 // manager for resources templated from a NamespaceClass.
 const FieldOwner = "namespaceclass-controller"
 
-// appliedResourcesAnnotation records, on the Namespace, the GVK+name of every
-// resource this controller applied on its last successful reconcile. It's
-// the source of truth for the diff — not a label selector — because a
-// resource can be dropped from a class's spec (or the namespace can switch
-// classes) without leaving any current signal behind to find it by.
+// AppliedResourcesAnnotation is where earlier versions of the controller
+// recorded, on the Namespace, every resource applied on the last successful
+// reconcile. It's no longer written: stale resources are now found by
+// sweeping watched GVKs for the parent label. It's still read, and then
+// removed, so resources it lists are pruned after an upgrade.
+//
+// TODO(#4): remove in the release after the one that stopped writing it.
 const AppliedResourcesAnnotation = "namespaceclass.akuity.io/applied-resources"
 
 const ReconcileErrorAnnotation = "namespaceclass.akuity.io/reconcile-error"
@@ -89,6 +93,25 @@ func (r *resourceBuilder) BuildFinalResource(
 	}
 
 	return res, nil
+}
+
+// IsOwnedByClass reports whether obj's controller ownerRef is the
+// NamespaceClass named className. The parent label alone isn't enough to
+// trust a resource as ours: a user can copy it onto their own resource.
+func IsOwnedByClass(obj metav1.Object, className string) bool {
+	ref := metav1.GetControllerOf(obj)
+	if ref == nil {
+		return false
+	}
+
+	gv, err := schema.ParseGroupVersion(ref.APIVersion)
+	if err != nil {
+		return false
+	}
+
+	return gv.Group == namespaceclassv1alpha1.GroupVersion.Group &&
+		ref.Kind == "NamespaceClass" &&
+		ref.Name == className
 }
 
 func templateResourceNamespace(u *unstructured.Unstructured, namespace string) (*unstructured.Unstructured, error) {
