@@ -61,7 +61,7 @@ func (noopManager) MaintainResourceWatchers(context.Context) error {
 func (r *resourceWatcherManager) MaintainResourceWatchers(ctx context.Context) error {
 	log := logf.FromContext(ctx)
 
-	allGvks, err := r.getAllGVKs(ctx)
+	allGvks, err := WatchedGVKs(ctx, r.client)
 	if err != nil {
 		return err
 	}
@@ -92,9 +92,12 @@ func (r *resourceWatcherManager) MaintainResourceWatchers(ctx context.Context) e
 	return nil
 }
 
-func (r *resourceWatcherManager) getAllGVKs(ctx context.Context) (sets.Set[schema.GroupVersionKind], error) {
+// WatchedGVKs returns every GVK any NamespaceClass may still have resources
+// of: the union of each class's GetWatchedGvks. It's the set of GVKs the
+// manager keeps watchers for, and the set a Namespace reconcile sweeps.
+func WatchedGVKs(ctx context.Context, c client.Reader) (sets.Set[schema.GroupVersionKind], error) {
 	list := &namespaceclassv1alpha1.NamespaceClassList{}
-	if err := r.client.List(ctx, list); err != nil {
+	if err := c.List(ctx, list); err != nil {
 		return nil, fmt.Errorf("failed getting NamespaceClassList: %w", err)
 	}
 

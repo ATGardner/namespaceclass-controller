@@ -272,11 +272,14 @@ data:
 		Expect(apierrors.IsNotFound(err)).To(BeTrue())
 	})
 
-	It("converges a Namespace to empty when its referenced class no longer exists", func() {
+	It("leaves a vanished class's resources to garbage collection", func() {
 		// The class is created with no finalizer, so unlike the "terminating"
 		// case above, Delete() here removes it immediately and fully — the
 		// Namespace's label is left pointing at a class that's genuinely gone,
-		// not one that's merely mid-deletion.
+		// not one that's merely mid-deletion. With the class gone, nothing
+		// tells the Namespace reconcile which GVKs to sweep; the class's
+		// controller ownerRef is what gets its resources removed, by the
+		// garbage collector, which envtest doesn't run.
 		class := &namespaceclassv1alpha1.NamespaceClass{
 			ObjectMeta: metav1.ObjectMeta{Name: "vanished-class"},
 			Spec: namespaceclassv1alpha1.NamespaceClassSpec{
@@ -318,8 +321,10 @@ data:
 		_, err = reconciler.Reconcile(ctx, req)
 		Expect(err).NotTo(HaveOccurred())
 
-		err = k8sClient.Get(ctx, types.NamespacedName{Namespace: ns.Name, Name: "vanished-cm"}, &cm)
-		Expect(apierrors.IsNotFound(err)).To(BeTrue())
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns.Name, Name: "vanished-cm"}, &cm)).To(Succeed())
+		owner := metav1.GetControllerOf(&cm)
+		Expect(owner).NotTo(BeNil())
+		Expect(owner.UID).To(Equal(class.UID))
 	})
 
 	It("records a real apply failure on the Namespace and clears it once fixed", func() {
@@ -715,5 +720,65 @@ data:
 
 		var got corev1.ConfigMap
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns.Name, Name: userCM.Name}, &got)).To(Succeed())
+	})
+
+	It("records the class's GVKs in its status before applying", func() {
+		class := &namespaceclassv1alpha1.NamespaceClass{
+			ObjectMeta: metav1.ObjectMeta{Name: "record-gvks-class"},
+			Spec: namespaceclassv1alpha1.NamespaceClassSpec{
+				Resources: []unstructured.Unstructured{toUnstructured(`
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: record-gvks-cm
+`)},
+			},
+		}
+		Expect(k8sClient.Create(ctx, class)).To(Succeed())
+		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, class)).To(Succeed()) })
+
+		ns := &corev1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   "record-gvks-ns",
+				Labels: map[string]string{common.NamespaceClassLabel: class.Name},
+			},
+		}
+		Expect(k8sClient.Create(ctx, ns)).To(Succeed())
+		DeferCleanup(func() { forceDeleteNamespace(ctx, ns) })
+
+		reconciler := &NamespaceReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), manager: manager.NoOp()}
+		_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: ns.Name}})
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: class.Name}, class)).To(Succeed())
+		Expect(class.Status.AppliedGVKs).To(ConsistOf(metav1.GroupVersionKind{Version: "v1", Kind: "ConfigMap"}))
+	})
+
+	// TODO(#4): remove together with the legacy applied-resources annotation.
+	It("prunes resources listed in the legacy applied-resources annotation, then removes it", func() {
+		ns := &corev1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "legacy-annotation-ns",
+				Annotations: map[string]string{
+					common.AppliedResourcesAnnotation: `[{"group":"","version":"v1","kind":"Secret","name":"legacy-secret"}]`,
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, ns)).To(Succeed())
+		DeferCleanup(func() { forceDeleteNamespace(ctx, ns) })
+
+		// No class uses Secret, so only the annotation can point at this one.
+		secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "legacy-secret", Namespace: ns.Name}}
+		Expect(k8sClient.Create(ctx, secret)).To(Succeed())
+
+		reconciler := &NamespaceReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), manager: manager.NoOp()}
+		_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: ns.Name}})
+		Expect(err).NotTo(HaveOccurred())
+
+		err = k8sClient.Get(ctx, types.NamespacedName{Namespace: ns.Name, Name: secret.Name}, &corev1.Secret{})
+		Expect(apierrors.IsNotFound(err)).To(BeTrue())
+
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: ns.Name}, ns)).To(Succeed())
+		Expect(ns.Annotations).NotTo(HaveKey(common.AppliedResourcesAnnotation))
 	})
 })

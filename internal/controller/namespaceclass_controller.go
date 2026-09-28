@@ -161,20 +161,31 @@ func (r *NamespaceClassReconciler) hasOwnedResources(
 	nsClass *namespaceclassv1alpha1.NamespaceClass,
 	gvk schema.GroupVersionKind,
 ) (bool, error) {
+	owned, err := r.listOwnedResources(ctx, nsClass, gvk)
+	return len(owned) > 0, err
+}
+
+// listOwnedResources returns every resource of the given GVK, in any
+// namespace, owned by nsClass.
+func (r *NamespaceClassReconciler) listOwnedResources(
+	ctx context.Context,
+	nsClass *namespaceclassv1alpha1.NamespaceClass,
+	gvk schema.GroupVersionKind,
+) ([]unstructured.Unstructured, error) {
 	list := &unstructured.UnstructuredList{}
 	list.SetGroupVersionKind(gvk.GroupVersion().WithKind(gvk.Kind + "List"))
 	if err := r.List(ctx, list, client.MatchingLabels{common.ParentClassLabel: nsClass.Name}); err != nil {
 		// The kind itself is gone (e.g. its CRD was deleted), so no
 		// resources of it can remain.
 		if meta.IsNoMatchError(err) {
-			return false, nil
+			return nil, nil
 		}
 
-		return false, err
+		return nil, err
 	}
 
-	return slices.ContainsFunc(list.Items, func(u unstructured.Unstructured) bool {
-		return common.IsOwnedByClass(&u, nsClass.Name)
+	return slices.DeleteFunc(list.Items, func(u unstructured.Unstructured) bool {
+		return !common.IsOwnedByClass(&u, nsClass.Name)
 	}), nil
 }
 
@@ -190,22 +201,29 @@ func (r *NamespaceClassReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
+// reconcileDelete deletes every resource the class still owns, in any
+// namespace, before letting the class go. Namespace reconciles would prune
+// them too, but only for Namespaces that get reconciled; this doesn't wait
+// on that.
 func (r *NamespaceClassReconciler) reconcileDelete(ctx context.Context, nsClass *namespaceclassv1alpha1.NamespaceClass) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+
 	if !controllerutil.ContainsFinalizer(nsClass, common.NamespaceClassFinalizer) {
 		return ctrl.Result{}, nil
 	}
 
-	var nsList corev1.NamespaceList
-	if err := r.List(ctx, &nsList, client.MatchingLabels{common.NamespaceClassLabel: nsClass.Name}); err != nil {
-		return ctrl.Result{}, err
-	}
+	for gvk := range nsClass.GetWatchedGvks() {
+		owned, err := r.listOwnedResources(ctx, nsClass, gvk)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed listing remaining %s resources: %w", gvk, err)
+		}
 
-	for _, ns := range nsList.Items {
-		applied, err := readAppliedResources(&ns)
-		if err != nil || len(applied) > 0 {
-			// Still converging (or annotation unreadable — be conservative
-			// and wait rather than remove the finalizer prematurely).
-			return ctrl.Result{}, nil
+		for i := range owned {
+			if err := r.Delete(ctx, &owned[i]); client.IgnoreNotFound(err) != nil {
+				return ctrl.Result{}, fmt.Errorf("failed deleting %s %s/%s: %w", gvk.Kind, owned[i].GetNamespace(), owned[i].GetName(), err)
+			}
+
+			log.Info("Deleted resource of deleted class", "kind", gvk.Kind, "namespace", owned[i].GetNamespace(), "name", owned[i].GetName())
 		}
 	}
 

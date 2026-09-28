@@ -110,10 +110,18 @@ The NamespaceController makes sure each namespace that has the
 NamespaceClass definition. Any change to the label value (switching between
 classes, adding or removing the label), will create all required resources
 from the "new" class, and delete all leftover resources from the "old" class
-(if any). The namespace keeps a `namespaceclass.akuity.io/applied-resources`
-annotation in order to keep track of the resources applied in the previous
-reconciliation run, and compare against the current one to know which ones
-need to be deleted.
+(if any). To find leftovers, it lists every GVK any NamespaceClass may still
+have resources of (see `status.appliedGVKs` below) for resources in the
+namespace that carry the `namespaceclass.akuity.io/parent` label and are
+controlled by a NamespaceClass, and deletes those the current class doesn't
+define. Because this relies on what exists in the cluster rather than on a
+record of past reconciles, a reconcile that fails partway leaves nothing
+behind.
+
+Earlier versions tracked applied resources in a
+`namespaceclass.akuity.io/applied-resources` annotation on the namespace. It
+is no longer written; on upgrade, the resources it lists are pruned and the
+annotation is removed.
 
 The controller also listens on changes in any NamespaceClass
 instance, in which case it will reconcile all Namespaces that reference that
@@ -131,7 +139,11 @@ resources of in the cluster. That is the GVKs in `spec.resources`, plus any GVK
 dropped from `spec.resources` that still has resources owned by the class. A
 dropped GVK is removed only after its last owned resource is gone, and the
 controller keeps watching every GVK in this list, so those resources can still
-be found and pruned.
+be found and pruned. The NamespaceController also adds a class's GVKs to this
+list before applying any of its resources.
+
+When a NamespaceClass is deleted, its finalizer deletes every resource the
+class controls, in any namespace, before the class is removed.
 
 ### NamespaceClass admission webhook
 

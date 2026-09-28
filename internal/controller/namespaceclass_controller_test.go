@@ -195,25 +195,19 @@ var _ = Describe("NamespaceClass Controller", func() {
 			})
 		})
 
-		Context("and a referencing Namespace has an unreadable applied-resources annotation", func() {
-			var badNs *corev1.Namespace
+		Context("and the class still owns resources when it is deleted", func() {
+			var ns *corev1.Namespace
 
 			BeforeEach(func() {
-				badNs = &corev1.Namespace{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:        "bad-annotation-ns",
-						Labels:      map[string]string{common.NamespaceClassLabel: resourceName},
-						Annotations: map[string]string{common.AppliedResourcesAnnotation: "not valid json"},
-					},
-				}
-				Expect(k8sClient.Create(ctx, badNs)).To(Succeed())
+				ns = &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "owned-on-delete-ns"}}
+				Expect(k8sClient.Create(ctx, ns)).To(Succeed())
 			})
 
 			AfterEach(func() {
-				forceDeleteNamespace(ctx, badNs)
+				forceDeleteNamespace(ctx, ns)
 			})
 
-			It("keeps the finalizer rather than assuming cleanup is done", func() {
+			It("deletes the resources it owns, and only those, before removing the finalizer", func() {
 				controllerReconciler := &NamespaceClassReconciler{
 					Client: k8sClient,
 					Scheme: k8sClient.Scheme(),
@@ -225,65 +219,38 @@ var _ = Describe("NamespaceClass Controller", func() {
 
 				resource := &namespaceclassv1alpha1.NamespaceClass{}
 				Expect(k8sClient.Get(ctx, typeNamespacedName, resource)).To(Succeed())
+				resource.Spec.Resources = []unstructured.Unstructured{toUnstructured(`
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: owned-cm
+`)}
+				Expect(k8sClient.Update(ctx, resource)).To(Succeed())
+
+				owned := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+					Name:      "owned-cm",
+					Namespace: ns.Name,
+					Labels:    map[string]string{common.ParentClassLabel: resourceName},
+				}}
+				Expect(controllerutil.SetControllerReference(resource, owned, k8sClient.Scheme())).To(Succeed())
+				Expect(k8sClient.Create(ctx, owned)).To(Succeed())
+
+				unowned := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+					Name:      "unowned-cm",
+					Namespace: ns.Name,
+					Labels:    map[string]string{common.ParentClassLabel: resourceName},
+				}}
+				Expect(k8sClient.Create(ctx, unowned)).To(Succeed())
+
 				Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
 
-				By("reconciling delete while the Namespace's record is unreadable")
 				_, err = controllerReconciler.Reconcile(ctx, req)
 				Expect(err).NotTo(HaveOccurred())
 
-				Expect(k8sClient.Get(ctx, typeNamespacedName, resource)).To(Succeed())
-				Expect(resource.Finalizers).To(ContainElement(common.NamespaceClassFinalizer))
-			})
-		})
+				err = k8sClient.Get(ctx, types.NamespacedName{Namespace: ns.Name, Name: owned.Name}, &corev1.ConfigMap{})
+				Expect(errors.IsNotFound(err)).To(BeTrue())
 
-		Context("and a referencing Namespace still has applied resources", func() {
-			var blockedNs *corev1.Namespace
-
-			BeforeEach(func() {
-				blockedNs = &corev1.Namespace{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:   "blocked-ns",
-						Labels: map[string]string{common.NamespaceClassLabel: resourceName},
-						Annotations: map[string]string{
-							common.AppliedResourcesAnnotation: `[{"version":"v1","kind":"ConfigMap","name":"my-cm"}]`,
-						},
-					},
-				}
-				Expect(k8sClient.Create(ctx, blockedNs)).To(Succeed())
-			})
-
-			AfterEach(func() {
-				forceDeleteNamespace(ctx, blockedNs)
-			})
-
-			It("keeps the finalizer until the Namespace finishes converging", func() {
-				controllerReconciler := &NamespaceClassReconciler{
-					Client: k8sClient,
-					Scheme: k8sClient.Scheme(),
-				}
-				req := reconcile.Request{NamespacedName: typeNamespacedName}
-
-				_, err := controllerReconciler.Reconcile(ctx, req) // adds finalizer
-				Expect(err).NotTo(HaveOccurred())
-
-				resource := &namespaceclassv1alpha1.NamespaceClass{}
-				Expect(k8sClient.Get(ctx, typeNamespacedName, resource)).To(Succeed())
-				Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
-
-				By("reconciling delete while the Namespace still has applied resources")
-				_, err = controllerReconciler.Reconcile(ctx, req)
-				Expect(err).NotTo(HaveOccurred())
-
-				Expect(k8sClient.Get(ctx, typeNamespacedName, resource)).To(Succeed())
-				Expect(resource.Finalizers).To(ContainElement(common.NamespaceClassFinalizer))
-
-				By("the Namespace finishing convergence")
-				Expect(k8sClient.Get(ctx, types.NamespacedName{Name: blockedNs.Name}, blockedNs)).To(Succeed())
-				delete(blockedNs.Annotations, common.AppliedResourcesAnnotation)
-				Expect(k8sClient.Update(ctx, blockedNs)).To(Succeed())
-
-				_, err = controllerReconciler.Reconcile(ctx, req)
-				Expect(err).NotTo(HaveOccurred())
+				Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns.Name, Name: unowned.Name}, &corev1.ConfigMap{})).To(Succeed())
 
 				err = k8sClient.Get(ctx, typeNamespacedName, resource)
 				Expect(errors.IsNotFound(err)).To(BeTrue())
