@@ -17,13 +17,18 @@ limitations under the License.
 package controller
 
 import (
+	"cmp"
 	"context"
 	"fmt"
+	"slices"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -35,6 +40,10 @@ import (
 	namespaceclassv1alpha1 "github.com/atgardner/namespaceclass-controller/api/v1alpha1"
 	"github.com/atgardner/namespaceclass-controller/internal/common"
 )
+
+// retiringGVKRequeueInterval is how often a class with a GVK dropped from its
+// spec re-checks whether that GVK's last owned resource is gone.
+const retiringGVKRequeueInterval = 30 * time.Second
 
 // NamespaceClassReconciler reconciles a NamespaceClass object
 type NamespaceClassReconciler struct {
@@ -75,6 +84,13 @@ func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		}
 	}
 
+	appliedGVKs, retiring, err := r.computeAppliedGVKs(ctx, nsClass)
+	if err != nil {
+		log.Error(err, "Failed to compute applied GVKs")
+		return ctrl.Result{}, err
+	}
+
+	nsClass.Status.AppliedGVKs = appliedGVKs
 	nsClass.Status.FailingNamespaces = failing
 	meta.SetStatusCondition(&nsClass.Status.Conditions, metav1.Condition{
 		Type:               "Ready",
@@ -90,7 +106,76 @@ func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 
 	log.Info("Done reconciling NamespaceClass status", "namespaces", len(nsList.Items), "failing", failing)
+
+	// Nothing watches the retiring GVK's resources on this class's behalf,
+	// so poll until Namespace reconciles have pruned the last of them.
+	if retiring {
+		return ctrl.Result{RequeueAfter: retiringGVKRequeueInterval}, nil
+	}
+
 	return ctrl.Result{}, nil
+}
+
+// computeAppliedGVKs returns the new status.appliedGVKs: the spec's GVKs,
+// plus every GVK already in status that still has resources owned by
+// nsClass. retiring reports whether any GVK was kept only for that reason.
+func (r *NamespaceClassReconciler) computeAppliedGVKs(
+	ctx context.Context,
+	nsClass *namespaceclassv1alpha1.NamespaceClass,
+) (applied []metav1.GroupVersionKind, retiring bool, err error) {
+	gvks := nsClass.GetGvks()
+	for _, gvk := range nsClass.Status.AppliedGVKs {
+		gvk := schema.GroupVersionKind(gvk)
+		if gvks.Has(gvk) {
+			continue
+		}
+
+		owned, err := r.hasOwnedResources(ctx, nsClass, gvk)
+		if err != nil {
+			return nil, false, fmt.Errorf("failed checking for remaining %s resources: %w", gvk, err)
+		}
+
+		if owned {
+			gvks.Insert(gvk)
+			retiring = true
+		}
+	}
+
+	applied = make([]metav1.GroupVersionKind, 0, gvks.Len())
+	for gvk := range gvks {
+		applied = append(applied, metav1.GroupVersionKind(gvk))
+	}
+
+	// Sorted so an unchanged set doesn't produce a status diff.
+	slices.SortFunc(applied, func(a, b metav1.GroupVersionKind) int {
+		return cmp.Or(cmp.Compare(a.Group, b.Group), cmp.Compare(a.Version, b.Version), cmp.Compare(a.Kind, b.Kind))
+	})
+
+	return applied, retiring, nil
+}
+
+// hasOwnedResources reports whether any resource of the given GVK, in any
+// namespace, is owned by nsClass.
+func (r *NamespaceClassReconciler) hasOwnedResources(
+	ctx context.Context,
+	nsClass *namespaceclassv1alpha1.NamespaceClass,
+	gvk schema.GroupVersionKind,
+) (bool, error) {
+	list := &unstructured.UnstructuredList{}
+	list.SetGroupVersionKind(gvk.GroupVersion().WithKind(gvk.Kind + "List"))
+	if err := r.List(ctx, list, client.MatchingLabels{common.ParentClassLabel: nsClass.Name}); err != nil {
+		// The kind itself is gone (e.g. its CRD was deleted), so no
+		// resources of it can remain.
+		if meta.IsNoMatchError(err) {
+			return false, nil
+		}
+
+		return false, err
+	}
+
+	return slices.ContainsFunc(list.Items, func(u unstructured.Unstructured) bool {
+		return common.IsOwnedByClass(&u, nsClass.Name)
+	}), nil
 }
 
 // SetupWithManager sets up the controller with the Manager.

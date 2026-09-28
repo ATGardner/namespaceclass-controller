@@ -42,6 +42,15 @@ type NamespaceClassStatus struct {
 	// +optional
 	FailingNamespaces int `json:"failingNamespaces,omitempty"`
 
+	// appliedGVKs is every GVK this class may still have resources of in
+	// the cluster: the GVKs in spec.resources, plus any GVK dropped from
+	// spec.resources that still has resources owned by this class. A dropped
+	// GVK is removed only once its last such resource is gone, so the
+	// controller keeps watching it until then.
+	// +listType=atomic
+	// +optional
+	AppliedGVKs []metav1.GroupVersionKind `json:"appliedGVKs,omitempty"`
+
 	// conditions represent the current state of the NamespaceClass resource.
 	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
 	//
@@ -98,6 +107,18 @@ func (n *NamespaceClass) GetGvks() sets.Set[schema.GroupVersionKind] {
 	set := sets.New[schema.GroupVersionKind]()
 	for _, res := range n.Spec.Resources {
 		set.Insert(res.GroupVersionKind())
+	}
+
+	return set
+}
+
+// GetWatchedGvks returns every GVK this class may still have resources of:
+// the spec's GVKs plus status.appliedGVKs, which also holds GVKs dropped from
+// the spec until their last resource is gone.
+func (n *NamespaceClass) GetWatchedGvks() sets.Set[schema.GroupVersionKind] {
+	set := n.GetGvks()
+	for _, gvk := range n.Status.AppliedGVKs {
+		set.Insert(schema.GroupVersionKind(gvk))
 	}
 
 	return set

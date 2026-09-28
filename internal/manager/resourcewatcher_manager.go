@@ -100,8 +100,7 @@ func (r *resourceWatcherManager) getAllGVKs(ctx context.Context) (sets.Set[schem
 
 	res := sets.New[schema.GroupVersionKind]()
 	for _, nsClass := range list.Items {
-		s := nsClass.GetGvks()
-		res = res.Union(s)
+		res = res.Union(nsClass.GetWatchedGvks())
 	}
 
 	return res, nil

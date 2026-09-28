@@ -126,6 +126,13 @@ updates the number of failed Namespaces, and a condition describing the number
 of successfully applied Namespaces and the general status of the
 NamespaceClass.
 
+It also maintains `status.appliedGVKs`: every GVK the class may still have
+resources of in the cluster. That is the GVKs in `spec.resources`, plus any GVK
+dropped from `spec.resources` that still has resources owned by the class. A
+dropped GVK is removed only after its last owned resource is gone, and the
+controller keeps watching every GVK in this list, so those resources can still
+be found and pruned.
+
 ### NamespaceClass admission webhook
 
 The admission webhook validates that every resource defined in a NamespaceClass

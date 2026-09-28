@@ -25,7 +25,9 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	namespaceclassv1alpha1 "github.com/atgardner/namespaceclass-controller/api/v1alpha1"
@@ -286,6 +288,137 @@ var _ = Describe("NamespaceClass Controller", func() {
 				err = k8sClient.Get(ctx, typeNamespacedName, resource)
 				Expect(errors.IsNotFound(err)).To(BeTrue())
 			})
+		})
+	})
+
+	Context("When tracking applied GVKs", func() {
+		ctx := context.Background()
+
+		configMapGVK := metav1.GroupVersionKind{Version: "v1", Kind: "ConfigMap"}
+		secretGVK := metav1.GroupVersionKind{Version: "v1", Kind: "Secret"}
+
+		var (
+			class      *namespaceclassv1alpha1.NamespaceClass
+			ns         *corev1.Namespace
+			reconciler *NamespaceClassReconciler
+			req        reconcile.Request
+		)
+
+		// createClass creates a class holding a ConfigMap and a Secret, and
+		// reconciles it twice: once to add the finalizer, once for status.
+		createClass := func(name string) {
+			class = &namespaceclassv1alpha1.NamespaceClass{
+				ObjectMeta: metav1.ObjectMeta{Name: name},
+				Spec: namespaceclassv1alpha1.NamespaceClassSpec{
+					Resources: []unstructured.Unstructured{
+						toUnstructured(`
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tracked-cm
+`),
+						toUnstructured(`
+apiVersion: v1
+kind: Secret
+metadata:
+  name: tracked-secret
+`),
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, class)).To(Succeed())
+
+			reconciler = &NamespaceClassReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+			req = reconcile.Request{NamespacedName: types.NamespacedName{Name: name}}
+			for range 2 {
+				_, err := reconciler.Reconcile(ctx, req)
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			Expect(k8sClient.Get(ctx, req.NamespacedName, class)).To(Succeed())
+		}
+
+		// dropSecretFromSpec edits the class to keep only its ConfigMap.
+		dropSecretFromSpec := func() {
+			Expect(k8sClient.Get(ctx, req.NamespacedName, class)).To(Succeed())
+			class.Spec.Resources = class.Spec.Resources[:1]
+			Expect(k8sClient.Update(ctx, class)).To(Succeed())
+		}
+
+		// createSecret creates a Secret labelled with the class as its
+		// parent, optionally with the class as its controller.
+		createSecret := func(name string, owned bool) *corev1.Secret {
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      name,
+					Namespace: ns.Name,
+					Labels:    map[string]string{common.ParentClassLabel: class.Name},
+				},
+			}
+			if owned {
+				Expect(controllerutil.SetControllerReference(class, secret, k8sClient.Scheme())).To(Succeed())
+			}
+
+			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
+			return secret
+		}
+
+		BeforeEach(func() {
+			ns = &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "applied-gvks-"}}
+			Expect(k8sClient.Create(ctx, ns)).To(Succeed())
+		})
+
+		AfterEach(func() {
+			forceDeleteNamespace(ctx, ns)
+
+			Expect(k8sClient.Delete(ctx, class)).To(Succeed())
+			_, err := reconciler.Reconcile(ctx, req) // removes the finalizer
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("records the spec's GVKs in status", func() {
+			createClass("applied-gvks-spec")
+
+			Expect(class.Status.AppliedGVKs).To(Equal([]metav1.GroupVersionKind{configMapGVK, secretGVK}))
+		})
+
+		It("keeps a GVK dropped from the spec until the class's last resource of it is gone", func() {
+			createClass("applied-gvks-retiring")
+			secret := createSecret("retiring-secret", true)
+
+			By("dropping the Secret from the spec while an owned Secret remains")
+			dropSecretFromSpec()
+
+			result, err := reconciler.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(BeNumerically(">", 0))
+
+			Expect(k8sClient.Get(ctx, req.NamespacedName, class)).To(Succeed())
+			Expect(class.Status.AppliedGVKs).To(Equal([]metav1.GroupVersionKind{configMapGVK, secretGVK}))
+
+			By("deleting the last owned Secret")
+			Expect(k8sClient.Delete(ctx, secret)).To(Succeed())
+
+			result, err = reconciler.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(BeZero())
+
+			Expect(k8sClient.Get(ctx, req.NamespacedName, class)).To(Succeed())
+			Expect(class.Status.AppliedGVKs).To(Equal([]metav1.GroupVersionKind{configMapGVK}))
+		})
+
+		It("does not keep a dropped GVK for a labelled resource the class doesn't own", func() {
+			createClass("applied-gvks-unowned")
+			createSecret("unowned-secret", false)
+
+			dropSecretFromSpec()
+
+			result, err := reconciler.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(BeZero())
+
+			Expect(k8sClient.Get(ctx, req.NamespacedName, class)).To(Succeed())
+			Expect(class.Status.AppliedGVKs).To(Equal([]metav1.GroupVersionKind{configMapGVK}))
 		})
 	})
 
